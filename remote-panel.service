@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=roux
-WorkingDirectory=/home/roux
+WorkingDirectory=/home/roux/qq-bot
 ExecStart=/usr/bin/python3 /home/roux/remote_panel.py
 Restart=always
 RestartSec=10
