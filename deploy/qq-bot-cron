@@ -1,0 +1,5 @@
+# QQ Bot 自愈 & 维护 cron 任务
+# 每 30 分钟健康检查
+*/30 * * * * root /home/roux/qq-bot-healthcheck.sh
+# 每天凌晨 3 点 git pull 更新
+0 3 * * * root /home/roux/qq-bot-daily-update.sh

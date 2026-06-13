@@ -1,0 +1,26 @@
+[Unit]
+Description=NapCat QQ Client Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment="DISPLAY=:99"
+ExecStartPre=-/usr/bin/pkill -f "opt/QQ/qq"
+ExecStart=/usr/bin/xvfb-run -a /root/Napcat/opt/QQ/qq --no-sandbox --disable-gpu -q 2712841947
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/roux/qq.log
+StandardError=append:/home/roux/qq.log
+
+# QQ 客户端启动慢，给足够时间
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+# 防止无限重启
+StartLimitInterval=600
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

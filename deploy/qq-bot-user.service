@@ -1,0 +1,19 @@
+[Unit]
+Description=QQ Bot Bridge Service (user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/roux/Claude_code_test
+Environment="PATH=/usr/bin:/usr/local/bin:/home/roux/.local/bin"
+ExecStart=/usr/bin/python3 -m qq_bot
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/roux/bridge.log
+StandardError=append:/home/roux/bridge.log
+StartLimitInterval=300
+StartLimitBurst=10
+
+[Install]
+WantedBy=default.target
