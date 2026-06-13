@@ -139,7 +139,7 @@ def _format_messages(messages):
     return lines
 
 
-async def _sync_to_db(group_id, target_count):
+async def _sync_to_db(group_id, target_count=500):
     from .ws import call_api
     all_msgs, seen_ids = [], set()
     start_seq = 0

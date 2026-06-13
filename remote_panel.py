@@ -107,12 +107,34 @@ def _run_restart_qq(task_id):
     except Exception as e:
         _set_task(task_id, status="error", progress=f"重启 QQ 失败: {e}")
 
+def _run_restart_napcat(task_id):
+    try:
+        _set_task(task_id, progress="重启 NapCat 服务...")
+        run("sudo systemctl restart napcat", 10)
+        time.sleep(5)
+        if port_open(WEBUI_PORT):
+            _set_task(task_id, status="done", progress="NapCat 已重启 ✓ (WebUI 就绪)")
+        else:
+            _set_task(task_id, status="done", progress="NapCat 已重启，等待 WebUI 就绪...")
+    except Exception as e:
+        _set_task(task_id, status="error", progress=f"重启 NapCat 失败: {e}")
+
+def _run_restart_remote_panel(task_id):
+    try:
+        _set_task(task_id, progress="重启远程面板...")
+        run("sudo systemctl restart remote-panel", 10)
+        time.sleep(3)
+        _set_task(task_id, status="done", progress="远程面板已重启 ✓")
+    except Exception as e:
+        _set_task(task_id, status="error", progress=f"重启面板失败: {e}")
+
 def _launch_task(action):
     task_id = uuid.uuid4().hex[:12]
     with _tasks_lock:
         _tasks[task_id] = {"status": "running", "progress": "准备中...", "lines": [], "action": action}
     fn = {"start": _run_start, "stop": _run_stop, "restart_bot": _run_restart_bot,
-          "restart_qq": _run_restart_qq}.get(action)
+          "restart_qq": _run_restart_qq, "restart_napcat": _run_restart_napcat,
+          "restart_panel": _run_restart_remote_panel}.get(action)
     if fn:
         threading.Thread(target=fn, args=(task_id,), daemon=True).start()
     return task_id
@@ -483,6 +505,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             qq_running = int(qq_out.strip() or 0) > 0
             qq_count, _ = run(f"sudo pgrep -fc '{NAP_QQ_PATTERN}' 2>/dev/null")
             vu = extract_verify_url()
+            # Tailscale
+            ts_out, _ = run("tailscale status --json 2>/dev/null")
+            ts_online = False; ts_ip = ""
+            if ts_out:
+                try:
+                    ts_data = json.loads(ts_out)
+                    ts_online = bool(ts_data.get("Self"))
+                    ts_ip = (ts_data.get("Self", {}).get("TailscaleIPs", [""])[0]
+                             if ts_data.get("Self", {}).get("TailscaleIPs") else "")
+                except Exception:
+                    pass
+            # Syncthing
+            st_running = port_open(8384)
             self._json({
                 "bot_running": bot_running,
                 "qq_running": qq_running,
@@ -491,6 +526,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "port3000": port_open(3000),
                 "port6099": port_open(WEBUI_PORT),
                 "needs_verify": bool(vu),
+                "tailscale": ts_online,
+                "tailscale_ip": ts_ip,
+                "syncthing": st_running,
             })
             return
 
@@ -541,7 +579,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
 
-        if path in ("/api/start", "/api/stop", "/api/restart_bot", "/api/restart_qq"):
+        if path in ("/api/start", "/api/stop", "/api/restart_bot", "/api/restart_qq",
+                      "/api/restart_napcat", "/api/restart_panel"):
             task_id = _launch_task(path.split("/")[-1])
             self._json({"task_id": task_id, "message": "任务已创建"})
             return
@@ -583,7 +622,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         lines = [f"群 {gid} 统计：共 {s.get('total',0)} 条消息，收录 {s.get('days',0)} 天"]
                         top = s.get("top_users", [])
                         if top:
-                            lines.append("话痨排行: " + ", ".join(f"{n}({c})" for n, c in top[:5]))
+                            # top_users now returns (user_id, nickname, count) triples
+                            lines.append("话痨排行: " + ", ".join(f"{n}({c})" for _, n, c in top[:5]))
                         self._json({"message": "\n".join(lines)})
                     except Exception:
                         self._json({"message": out})

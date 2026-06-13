@@ -16,9 +16,9 @@ async def handle_stats(ws, group_id):
     if stats["top_users"]:
         lines.append("🏆 话痨排行：")
         medals = ["🥇", "🥈", "🥉"]
-        for i, (name, cnt) in enumerate(stats["top_users"][:10]):
+        for i, (uid, name, cnt) in enumerate(stats["top_users"][:10]):
             prefix = medals[i] if i < 3 else f"{i + 1}."
-            lines.append(f"  {prefix} {name}: {cnt} 条 ({cnt / stats['total'] * 100:.1f}%)")
+            lines.append(f"  {prefix} {name}({uid}): {cnt} 条 ({cnt / stats['total'] * 100:.1f}%)")
         lines.append("")
     if stats["hourly"]:
         peak = max(stats["hourly"], key=lambda x: x[1])

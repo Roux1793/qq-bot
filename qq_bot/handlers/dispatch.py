@@ -214,9 +214,9 @@ async def handle_messages(ws):
                     if stats["top_users"]:
                         lines.append("🏆 话痨排行：")
                         medals = ["🥇", "🥈", "🥉"]
-                        for i, (name, cnt) in enumerate(stats["top_users"][:10]):
+                        for i, (uid, name, cnt) in enumerate(stats["top_users"][:10]):
                             prefix = medals[i] if i < 3 else f"{i + 1}."
-                            lines.append(f"  {prefix} {name}: {cnt} 条 ({cnt / stats['total'] * 100:.1f}%)")
+                            lines.append(f"  {prefix} {name}({uid}): {cnt} 条 ({cnt / stats['total'] * 100:.1f}%)")
                         lines.append("")
                     if stats["hourly"]:
                         peak = max(stats["hourly"], key=lambda x: x[1])
@@ -390,19 +390,34 @@ async def handle_messages(ws):
                     if not group_has_perm(group_id, "chat"):
                         continue
                     persona = get_persona_for_group(group_id)
-                    system_msg = persona["system_prompt"] + f"\n\n当前对你说话的人是「{nickname}」(QQ:{user_id})。群聊中有多个人，请根据对方的态度选择合适的方式回应。"
+                    system_msg = (persona["system_prompt"]
+                        + f"\n\n【重要】当前对你说话的人是「{nickname}」(QQ:{user_id})。"
+                        + "群聊中有多个不同的人，每个人的对话是独立的。你必须分清谁说过什么——不要将A的话当成B的话，不要混淆不同人的观点和身份。"
+                        + "如果对话历史中出现了其他人的名字，那说明是不同的人在跟你说话，请分别对待。")
                     messages = [{"role": "system", "content": system_msg}]
 
                     history_key = (group_id, user_id)
                     history = conv_history.get(history_key)
                     if history:
                         for h in list(history):
-                            messages.append({"role": h["role"], "content": h["content"]})
+                            if h["role"] == "user":
+                                # 标注说话人身份，防止LLM混淆
+                                speaker = h.get("name", str(user_id))
+                                messages.append({"role": "user", "content": f"「{speaker}」说：{h['content']}"})
+                            else:
+                                messages.append({"role": h["role"], "content": h["content"]})
 
                     buf = list(msg_buffer.get(group_id, deque(maxlen=30)))
                     recent = buf[-5:] if len(buf) >= 5 else buf
                     if recent:
-                        ctx_text = "【群聊环境】\n" + "\n".join(recent) + "\n\n【你的回复】（注意：当前是「" + nickname + "」在对你说话）"
+                        # 在群聊上下文中标注其他说话人 vs 目标说话人
+                        tagged_recent = []
+                        for line in recent:
+                            if nickname in line:
+                                tagged_recent.append(line + " ← 当前说话人")
+                            else:
+                                tagged_recent.append(line)
+                        ctx_text = "【群聊环境】（标注了谁是当前对你说话的人）\n" + "\n".join(tagged_recent) + f"\n\n【请回复「{nickname}」(QQ:{user_id})，注意他不是群里其他人】"
                         messages.append({"role": "user", "content": f"{ctx_text}\n{cmd}"})
                     else:
                         messages.append({"role": "user", "content": f"「{nickname}」对你说：{cmd}"})
@@ -412,7 +427,7 @@ async def handle_messages(ws):
                         await send_group_msg(ws, group_id, maybe_sticker(reply))
                         if history_key not in conv_history:
                             conv_history[history_key] = deque(maxlen=16)
-                        conv_history[history_key].append({"role": "user", "content": cmd})
+                        conv_history[history_key].append({"role": "user", "name": nickname, "content": cmd})
                         conv_history[history_key].append({"role": "assistant", "content": reply})
             else:
                 print(f"[群{group_id}] {nickname}: {raw_msg[:60]}")

@@ -110,8 +110,11 @@ def get_stats(group_id):
             db.close()
             return {"total": 0, "top_users": [], "hourly": [], "daily": [], "days": 0}
         top_users = db.execute(
-            "SELECT nickname,COUNT(*) c FROM messages WHERE group_id=? GROUP BY user_id ORDER BY c DESC LIMIT 10",
-            (group_id,)).fetchall()
+            "SELECT user_id,"
+            "(SELECT nickname FROM messages m2 WHERE m2.user_id=m1.user_id AND m2.group_id=? "
+            " ORDER BY m2.created_at DESC LIMIT 1) as nickname,"
+            "COUNT(*) c FROM messages m1 WHERE m1.group_id=? GROUP BY m1.user_id ORDER BY c DESC LIMIT 10",
+            (group_id, group_id)).fetchall()
         hourly = db.execute(
             "SELECT substr(created_at,12,2) h,COUNT(*) c FROM messages WHERE group_id=? GROUP BY h ORDER BY h",
             (group_id,)).fetchall()
