@@ -1,0 +1,16 @@
+[Unit]
+Description=QQ Bot Remote Panel
+After=network.target
+
+[Service]
+Type=simple
+User=roux
+WorkingDirectory=/home/roux
+ExecStart=/usr/bin/python3 /home/roux/remote_panel.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/roux/panel.log
+StandardError=append:/home/roux/panel.log
+
+[Install]
+WantedBy=multi-user.target

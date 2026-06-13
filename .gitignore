@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+.env
+bridge.log
+panel.log
+qq.log
+personas.json
+auto_reply.json
+active_personas.json
+silenced_groups.json
+group_perms.json
+group_styles.json
