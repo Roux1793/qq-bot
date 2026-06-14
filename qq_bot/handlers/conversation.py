@@ -69,6 +69,15 @@ async def build_conversation(
             else:
                 messages.append({"role": h["role"], "content": h["content"]})
 
+    # ── 硬提醒（recency bias：放在最后，覆盖 LLM 的幻觉和冲动倾向）──
+    HARD_REMINDER = (
+        "\n\n[硬事实提醒——这些比你自己的判断更重要，必须遵守]"
+        "\n• 你的生日是2005年2月14日。禁止说2007、2008或任何其他年份。"
+        "\n• 你永远是15岁。禁止用当前年份计算年龄。"
+        "\n• 被挑衅时只冷淡回应或无视。禁止吵架、禁止威胁、禁止说「报警」「放人」之类的对抗性语言。"
+        "\n• 你是大小姐，优雅从容，不是吵架的泼妇。"
+    )
+
     # ── 群聊环境（扩展上下文 + 标注所有说话人）──
     buf = list(msg_buffer.get(group_id, deque(maxlen=60)))
     recent = buf[-GROUP_CONTEXT_LINES:] if len(buf) >= GROUP_CONTEXT_LINES else buf
@@ -100,13 +109,14 @@ async def build_conversation(
             + (f"。{reply_context}" if reply_context else "")
             + f"。请综合群聊环境和你的对话历史，自然地回复。\n"
             + f"回复要求：像真人聊天一样，长短由内容决定，不要客套模板。"
+            + HARD_REMINDER
         )
         messages.append({"role": "user", "content": f"{ctx_text}\n{cmd}"})
     else:
         msg_text = f"「{nickname}」对你说：{cmd}"
         if reply_context:
             msg_text = f"「{nickname}」{reply_context}：{cmd}"
-        messages.append({"role": "user", "content": msg_text})
+        messages.append({"role": "user", "content": msg_text + HARD_REMINDER})
 
     # ── 自适应 max_tokens ──
     ctx_len = len(cmd or "") + sum(len(m["content"]) for m in messages)

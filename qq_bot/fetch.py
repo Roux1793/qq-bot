@@ -1,12 +1,16 @@
 """QQ Bot 消息拉取 — HTTP → WebSocket → 本地 DB 三级回退"""
 import asyncio
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 
 from .config import DB_PATH
 from .db import query_messages
+
+# 同步缓存：避免短时间内重复拉取
+_last_synced: dict[int, datetime] = {}
+_SYNC_COOLDOWN = timedelta(seconds=60)
 
 
 # ====== 公共分页器 ======
@@ -101,16 +105,26 @@ async def fetch_messages(group_id, count, since=None, until=None):
     """统一消息拉取入口。返回 (lines, source) 其中 source 为 'api'/'ws'/'db'"""
     lines = await _paginate_messages(group_id, count, use_ws=False)
     if lines:
-        await _sync_to_db(group_id, count)
+        await sync_to_db_cached(group_id, count)
         return _filter_by_time(lines, since, until), 'api'
 
     lines = await _paginate_messages(group_id, count, use_ws=True)
     if lines:
-        await _sync_to_db(group_id, count)
+        await sync_to_db_cached(group_id, count)
         return _filter_by_time(lines, since, until), 'ws'
 
     lines = query_messages(group_id, limit=count, since=since, until=until)
     return lines, 'db'
+
+
+async def sync_to_db_cached(group_id, target_count=500):
+    """带缓存的同步入口：60 秒内同一群不重复拉取"""
+    now = datetime.now()
+    last = _last_synced.get(group_id)
+    if last and (now - last) < _SYNC_COOLDOWN:
+        return 0  # 跳过，刚同步过
+    _last_synced[group_id] = now
+    return await _sync_to_db(group_id, target_count)
 
 
 async def _sync_to_db(group_id, target_count=500):

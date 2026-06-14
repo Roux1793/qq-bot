@@ -104,6 +104,8 @@ async def handle_knowledge(ws, group_id, cmd):
 
 
 async def _extract_knowledge(ws, group_id):
+    from ..fetch import sync_to_db_cached
+    await sync_to_db_cached(group_id)
     lines = query_messages(group_id, limit=50)
     if len(lines) < 10:
         return

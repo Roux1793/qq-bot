@@ -20,7 +20,7 @@ from ..permissions import (is_admin, group_has_perm, group_admin_enabled,
                             group_admin_public, save_active_personas)
 from ..send import (send_group_msg, send_private_msg, maybe_sticker,
                      load_json, load_personas, load_auto_reply_rules,
-                     load_silenced)
+                     load_silenced, save_silenced)
 from ..llm import call_llm, HELP_TEXT, ADMIN_HELP, update_group_style
 from ..fetch import fetch_messages
 from ..llm import generate_summary
@@ -66,6 +66,107 @@ async def connect_ws():
             delay = min(retry * 5, 60)
             print(f"[WS] 断开: {e}，{delay}s 后重连")
             await asyncio.sleep(delay)
+
+
+# ====== 指令路由：功能性（不加载人设）======
+
+async def _try_functional(ws, group_id, user_id, cmd, effective_admin, now) -> bool:
+    """处理功能性指令。返回 True 表示已处理，False 表示不是功能性指令。"""
+    perms_ok = group_has_perm
+
+    # ── help ──
+    if re.search(r"help|帮助|命令|功能", cmd):
+        if not perms_ok(group_id, "help"):
+            await send_group_msg(ws, group_id, "此群未开启 help 功能。")
+            return True
+        await send_group_msg(ws, group_id,
+            HELP_TEXT + ("\n\n" + ADMIN_HELP if effective_admin else ""))
+        return True
+
+    # ── 搜索 ──
+    if re.search(r"搜索|查找|搜", cmd):
+        if not perms_ok(group_id, "search"):
+            await send_group_msg(ws, group_id, "此群未开启搜索功能。")
+            return True
+        await handle_search(ws, group_id, cmd)
+        return True
+
+    # ── 统计 ──
+    if re.search(r"统计|排行|活跃", cmd):
+        if not perms_ok(group_id, "stats"):
+            await send_group_msg(ws, group_id, "此群未开启统计功能。")
+            return True
+        await handle_stats(ws, group_id)
+        return True
+
+    # ── 总结 ──
+    if re.search(r"总结|汇总|整理", cmd):
+        if not perms_ok(group_id, "summary"):
+            await send_group_msg(ws, group_id, "此群未开启总结功能。")
+            return True
+        await handle_summary(ws, group_id, user_id, cmd, now)
+        return True
+
+    # ── 知识库（只读）──
+    if re.search(r"回忆|知识点|知识列表", cmd):
+        await handle_knowledge(ws, group_id, cmd)
+        return True
+
+    # ── 规则列表（只读）──
+    if re.search(r"规则列表|查看规则", cmd):
+        await handle_admin(ws, group_id, user_id, cmd)
+        return True
+
+    # ── 禁言/恢复 ──
+    if re.search(r"^silence$|^静音$|^闭嘴$", cmd):
+        if not effective_admin:
+            await send_group_msg(ws, group_id, "权限不足。")
+        else:
+            silenced_groups.add(group_id)
+            save_silenced()
+            await send_group_msg(ws, group_id, "已静默，不再主动发言。")
+            print(f"[禁言] 群{group_id} 已 silence")
+        return True
+
+    if re.search(r"^恢复$|^解除$|^说话$", cmd):
+        if not effective_admin:
+            await send_group_msg(ws, group_id, "权限不足。")
+        else:
+            silenced_groups.discard(group_id)
+            save_silenced()
+            await send_group_msg(ws, group_id, "已恢复发言 ✓")
+            print(f"[禁言] 群{group_id} 已恢复")
+        return True
+
+    # ── 提取知识 / 加删规则 / admin ──
+    if re.search(r"提取知识|分析知识|加规则|删规则", cmd) or cmd.startswith("admin"):
+        if not effective_admin:
+            await send_group_msg(ws, group_id, "权限不足。")
+        else:
+            await handle_admin(ws, group_id, user_id, cmd)
+        return True
+
+    return False
+
+
+# ====== 指令路由：人设驱动（加载人设 + 对话历史）======
+
+async def _try_persona(ws, group_id, user_id, cmd, effective_admin) -> bool:
+    """处理人设相关指令。返回 True 表示已处理。"""
+    # ── 人设管理 ──
+    if re.search(r"切换|人设|修改人设|创建人设", cmd):
+        is_readonly = not re.search(r"切换|修改|创建", cmd)
+        if is_readonly:
+            await handle_persona(ws, group_id, user_id, cmd)
+        elif effective_admin:
+            await handle_persona(ws, group_id, user_id, cmd)
+        else:
+            await send_group_msg(ws, group_id,
+                "权限不足。切换/修改/创建人设需要管理员权限。\n"
+                "全员可用：@bot 人设列表 / 人设详情 <名称>")
+        return True
+
+    return False
 
 
 # ====== 核心消息处理 ======
@@ -168,14 +269,12 @@ async def handle_messages(ws):
                 action = m.group(2)
                 if action == "silence":
                     silenced_groups.add(gid)
-                    from ..send import save_silenced as do_save
-                    do_save()
+                    save_silenced()
                     await send_private_msg(ws, user_id, f"群 {gid} 已禁言 ✓")
                     print(f"[禁言] 群{gid} 已 silence (管理员私聊)")
                 else:
                     silenced_groups.discard(gid)
-                    from ..send import save_silenced as do_save
-                    do_save()
+                    save_silenced()
                     await send_private_msg(ws, user_id, f"群 {gid} 已恢复 ✓")
                     print(f"[禁言] 群{gid} 已恢复 (管理员私聊)")
                 continue
@@ -204,9 +303,9 @@ async def handle_messages(ws):
             if m:
                 gid = int(m.group(1))
                 await send_private_msg(ws, user_id, f"正在统计群 {gid} ...")
-                from ..fetch import _sync_to_db
+                from ..fetch import sync_to_db_cached
                 from ..db import get_stats
-                await _sync_to_db(gid)
+                await sync_to_db_cached(gid)
                 stats = get_stats(gid)
                 if stats["total"] == 0:
                     await send_private_msg(ws, user_id, f"群 {gid} 暂无聊天数据~")
@@ -295,135 +394,58 @@ async def handle_messages(ws):
                 real_admin = is_admin(user_id)
                 admin_enabled = group_admin_enabled(group_id)
                 admin_public = group_admin_public(group_id)
-                # 真管理员永远有管理员权限；普通用户需群开启 admin_enabled + admin_public
                 effective_admin = real_admin or (admin_enabled and admin_public)
 
-                # === help ===
-                if re.search(r"help|帮助|命令|功能", cmd):
-                    if not group_has_perm(group_id, "help"):
-                        continue
-                    if effective_admin:
-                        await send_group_msg(ws, group_id, HELP_TEXT + "\n\n" + ADMIN_HELP)
+                # ═══════════════════════════════════════════════════════════
+                #  功能性指令 — 不加载人设，不记录对话历史，纯工具
+                # ═══════════════════════════════════════════════════════════
+
+                if await _try_functional(ws, group_id, user_id, cmd, effective_admin, now):
+                    continue
+
+                # ═══════════════════════════════════════════════════════════
+                #  人设驱动指令 — 加载人设，记录对话历史，角色扮演
+                # ═══════════════════════════════════════════════════════════
+
+                if await _try_persona(ws, group_id, user_id, cmd, effective_admin):
+                    continue
+
+                # ── 自由对话（默认人设路径）──
+                if not group_has_perm(group_id, "chat"):
+                    continue
+
+                # 解析 QQ 引用（reply）
+                reply_context = ""
+                clean_cmd = cmd
+                reply_match = re.match(r"^\[CQ:reply,id=(-?\d+)\]", cmd)
+                if reply_match:
+                    clean_cmd = cmd[reply_match.end():].strip()
+                    buf_list = list(msg_buffer.get(group_id, deque(maxlen=60)))
+                    quoted_text = None
+                    for line in reversed(buf_list[:-1]):
+                        m = re.match(r"\[\d\d:\d\d\] (.+?): (.+)", line)
+                        if m:
+                            quoted_text = f"「{m.group(1)}」说过：{m.group(2)}"
+                            break
+                    if quoted_text:
+                        reply_context = f"（此人在回复 {quoted_text}）"
+                    elif clean_cmd:
+                        reply_context = "（此人在引用/回复群里的某条消息）"
                     else:
-                        await send_group_msg(ws, group_id, HELP_TEXT)
+                        reply_context = "（此人在引用/回复群里的某条消息，但没附加文字）"
 
-                # === 搜索（全员可用）===
-                elif re.search(r"搜索|查找|搜", cmd):
-                    if not group_has_perm(group_id, "search"):
-                        continue
-                    await handle_search(ws, group_id, cmd)
-
-                # === 人设（切换/修改/创建=管理员，列表/详情/查看=全员）===
-                elif re.search(r"切换|人设|修改人设|创建人设", cmd):
-                    is_readonly = not re.search(r"切换|修改|创建", cmd)
-                    if is_readonly:
-                        # 只读：人设列表 / 人设详情 / 当前人设
-                        await handle_persona(ws, group_id, user_id, cmd)
-                    elif effective_admin:
-                        await handle_persona(ws, group_id, user_id, cmd)
-                    else:
-                        await send_group_msg(ws, group_id, "权限不足。切换/修改/创建人设需要管理员权限。\n全员可用：@bot 人设列表 / 人设详情 <名称>")
-
-                # === 统计（全员可用）===
-                elif re.search(r"统计|排行|活跃", cmd):
-                    if not group_has_perm(group_id, "stats"):
-                        continue
-                    await handle_stats(ws, group_id)
-
-                # === 总结（全员可用）===
-                elif re.search(r"总结|汇总|整理", cmd):
-                    if not group_has_perm(group_id, "summary"):
-                        continue
-                    await handle_summary(ws, group_id, user_id, cmd, now)
-
-                # === 知识库（回忆/列表=全员，提取=管理员）===
-                elif re.search(r"回忆|知识点|知识列表", cmd):
-                    # 只读查询：全员可用
-                    await handle_knowledge(ws, group_id, cmd)
-
-                elif re.search(r"提取知识|分析知识", cmd):
-                    if not effective_admin:
-                        await send_group_msg(ws, group_id, "权限不足。提取知识需要管理员权限。")
-                    else:
-                        await handle_admin(ws, group_id, user_id, cmd)
-
-                # === 规则管理（加/删=管理员，列表=全员）===
-                elif re.search(r"规则列表|查看规则", cmd):
-                    # 只读：全员可用
-                    await handle_admin(ws, group_id, user_id, cmd)
-
-                elif re.search(r"加规则|删规则", cmd):
-                    if not effective_admin:
-                        await send_group_msg(ws, group_id, "权限不足。管理规则需要管理员权限。")
-                    else:
-                        await handle_admin(ws, group_id, user_id, cmd)
-
-                # === 禁言/恢复（管理员）===
-                elif re.search(r"^silence$|^静音$|^闭嘴$", cmd):
-                    if not effective_admin:
-                        await send_group_msg(ws, group_id, "权限不足。")
-                    else:
-                        silenced_groups.add(group_id)
-                        from ..send import save_silenced as do_save
-                        do_save()
-                        await send_group_msg(ws, group_id, "已静默，不再主动发言。管理员私聊我「群号 恢复」或群里@我说「恢复」即可。")
-                        print(f"[禁言] 群{group_id} 已 silence")
-
-                elif re.search(r"^恢复$|^解除$|^说话$", cmd):
-                    if not effective_admin:
-                        await send_group_msg(ws, group_id, "权限不足。")
-                    else:
-                        silenced_groups.discard(group_id)
-                        from ..send import save_silenced as do_save
-                        do_save()
-                        await send_group_msg(ws, group_id, "已恢复发言 ✓")
-                        print(f"[禁言] 群{group_id} 已恢复")
-
-                elif cmd.startswith("admin"):
-                    if not effective_admin:
-                        await send_group_msg(ws, group_id, "权限不足。")
-                    else:
-                        await handle_admin(ws, group_id, user_id, cmd)
-
-                # === LLM 自由对话（全员可用）===
-                else:
-                    if not group_has_perm(group_id, "chat"):
-                        continue
-
-                    # ── 解析 QQ 引用（reply）──
-                    reply_context = ""
-                    clean_cmd = cmd
-                    reply_match = re.match(r"^\[CQ:reply,id=(-?\d+)\]", cmd)
-                    if reply_match:
-                        clean_cmd = cmd[reply_match.end():].strip()
-                        buf_list = list(msg_buffer.get(group_id, deque(maxlen=60)))
-                        quoted_text = None
-                        for line in reversed(buf_list[:-1]):
-                            m = re.match(r"\[\d\d:\d\d\] (.+?): (.+)", line)
-                            if m:
-                                quoted_text = f"「{m.group(1)}」说过：{m.group(2)}"
-                                break
-                        if quoted_text:
-                            reply_context = f"（此人在回复 {quoted_text}）"
-                        elif clean_cmd:
-                            reply_context = "（此人在引用/回复群里的某条消息）"
-                        else:
-                            reply_context = "（此人在引用/回复群里的某条消息，但没附加文字）"
-
-                    # ── 构建对话（KB检索/联网搜索/上下文/历史 集成在 conversation 模块）──
-                    messages, dyn_tokens = await build_conversation(
-                        group_id, user_id, nickname, clean_cmd or cmd,
-                        reply_context=reply_context,
-                    )
-
-                    reply = await call_llm(messages, max_tokens=dyn_tokens, temperature=REPLY_TEMPERATURE)
-                    if reply:
-                        await send_group_msg(ws, group_id, maybe_sticker(reply))
-                        history_key = (group_id, user_id)
-                        if history_key not in conv_history:
-                            conv_history[history_key] = deque(maxlen=MAX_CONV_ENTRIES)
-                        conv_history[history_key].append({"role": "user", "name": nickname, "content": clean_cmd or cmd})
-                        conv_history[history_key].append({"role": "assistant", "content": reply})
+                messages, dyn_tokens = await build_conversation(
+                    group_id, user_id, nickname, clean_cmd or cmd,
+                    reply_context=reply_context,
+                )
+                reply = await call_llm(messages, max_tokens=dyn_tokens, temperature=REPLY_TEMPERATURE)
+                if reply:
+                    await send_group_msg(ws, group_id, maybe_sticker(reply))
+                    history_key = (group_id, user_id)
+                    if history_key not in conv_history:
+                        conv_history[history_key] = deque(maxlen=MAX_CONV_ENTRIES)
+                    conv_history[history_key].append({"role": "user", "name": nickname, "content": clean_cmd or cmd})
+                    conv_history[history_key].append({"role": "assistant", "content": reply})
             else:
                 print(f"[群{group_id}] {nickname}: {raw_msg[:60]}")
                 await process_auto_reply(ws, group_id, user_id, nickname, raw_msg, now)

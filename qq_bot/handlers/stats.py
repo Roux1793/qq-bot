@@ -1,12 +1,12 @@
 """统计命令处理"""
 from ..db import get_stats
-from ..fetch import _sync_to_db as sync_to_db
+from ..fetch import sync_to_db_cached
 from ..send import send_group_msg
 
 
 async def handle_stats(ws, group_id):
     await send_group_msg(ws, group_id, "正在同步并统计...")
-    await sync_to_db(group_id)
+    await sync_to_db_cached(group_id)
     stats = get_stats(group_id)
     if stats["total"] == 0:
         await send_group_msg(ws, group_id, "暂无群聊数据~")

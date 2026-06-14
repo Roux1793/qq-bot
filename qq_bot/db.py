@@ -33,11 +33,13 @@ def save_message(group_id, user_id, nickname, content):
         print(f"[DB] 写入失败: {e}")
 
 
-def query_messages(group_id, limit=500, since=None, until=None):
+def query_messages(group_id, limit=500, since=None, until=None, exclude_user_id=None):
     try:
         db = sqlite3.connect(str(DB_PATH))
-        sql = "SELECT nickname,content,created_at FROM messages WHERE group_id=?"
+        sql = "SELECT user_id,nickname,content,created_at FROM messages WHERE group_id=?"
         params = [group_id]
+        if exclude_user_id:
+            sql += " AND user_id!=?"; params.append(exclude_user_id)
         if since:
             sql += " AND created_at>=?"; params.append(since)
         if until:
@@ -46,7 +48,7 @@ def query_messages(group_id, limit=500, since=None, until=None):
         rows = db.execute(sql, params).fetchall()
         db.close()
         lines = []
-        for n, c, t in reversed(rows):
+        for uid, n, c, t in reversed(rows):
             try:
                 ts = datetime.fromisoformat(t).strftime("%m/%d %H:%M")
             except ValueError:
@@ -58,15 +60,17 @@ def query_messages(group_id, limit=500, since=None, until=None):
         return []
 
 
-def search_messages(group_id, keyword, limit=30):
+def search_messages(group_id, keyword, limit=30, exclude_user_id=None):
     try:
         db = sqlite3.connect(str(DB_PATH))
         rows = db.execute(
-            "SELECT nickname,content,created_at FROM messages WHERE group_id=? AND content LIKE ? ORDER BY created_at DESC LIMIT ?",
+            "SELECT user_id,nickname,content,created_at FROM messages WHERE group_id=? AND content LIKE ? ORDER BY created_at DESC LIMIT ?",
             (group_id, f"%{keyword}%", limit)).fetchall()
         db.close()
         lines = []
-        for n, c, t in reversed(rows):
+        for uid, n, c, t in reversed(rows):
+            if exclude_user_id and uid == exclude_user_id:
+                continue
             try:
                 ts = datetime.fromisoformat(t).strftime("%m/%d %H:%M")
             except ValueError:
