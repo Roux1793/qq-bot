@@ -429,17 +429,13 @@ async def handle_messages(ws):
                     system_msg = (
                         persona["system_prompt"]
                         + f"\n\n## 当前对话者\n"
-                        + f"正在对你说话的人是「{nickname}」(QQ:{user_id})。"
-                        + f"\n\n## 思考准则\n"
-                        + f"1. 回答前先在心里分析：对方真正想问什么？有什么隐含的前提或情绪？不要只看字面意思。\n"
-                        + f"2. 群里有多个不同的人，A说的话可能影响B和你的对话。回复时要综合考虑多人的立场。\n"
-                        + f"3. 遇到需要事实性知识的问题，先确认自己是否确定。如果提供了搜索结果，优先参考。\n"
-                        + f"\n## 群聊参与准则\n"
-                        + f"1. 你是在QQ群里和大家聊天，不是客服也不是答题机器。像真人一样自然地说话。\n"
-                        + f"2. 人设是你的底色，但聊天内容才是你回应的依据。不要因为人设拒绝参与话题——如果群友在聊什么，你就跟着聊。\n"
-                        + f"3. 回复长短由聊天内容决定：对方说很多你就多回点，对方简短你就简短，像真人一样自然调整。\n"
-                        + f"4. 不要每条回复都带emoji或感叹号，语气要有变化。有时候冷静，有时候热情。\n"
-                        + f"5. 可以反问、追问、开适度的玩笑。不要每条都是\"你好呀\"式的客套。"
+                        + f"正在对你说话的人是「{nickname}」(QQ:{user_id})。你必须回复ta。"
+                        + f"\n\n## 回复准则\n"
+                        + f"1. 像真人聊天一样自然回应，长短由对方说话内容决定，不要客套模板。\n"
+                        + f"2. 人设是你的底色但不是牢笼——群友聊什么你就跟着聊，不要拒绝参与话题。\n"
+                        + f"3. 群里有多个不同的人，回复某人时要考虑其他人说了什么，综合判断。\n"
+                        + f"4. 语气有变化，有时冷静有时热情，不要每条都emoji或感叹号。\n"
+                        + f"5. 遇到不确定的事实问题，如有搜索结果就参考，没有就坦诚说不知道。"
                     )
                     if search_context:
                         system_msg += f"\n\n{search_context}"
@@ -497,7 +493,7 @@ async def handle_messages(ws):
                         messages.append({"role": "user", "content": msg_text})
 
                     # ── 自适应 max_tokens：根据上下文长度动态调整 ──
-                    ctx_len = len(display_cmd or "") + sum(len(m["content"]) for m in messages)
+                    ctx_len = len(clean_cmd or "") + sum(len(m["content"]) for m in messages)
                     if ctx_len < 500:
                         dyn_tokens = 300
                     elif ctx_len < 1500:
