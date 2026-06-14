@@ -9,7 +9,9 @@ from datetime import datetime, timedelta
 
 import websockets
 
-from ..config import (WS_URL, ADMIN_QQ, STYLE_UPDATE_INTERVAL)
+from ..config import (WS_URL, ADMIN_QQ, STYLE_UPDATE_INTERVAL,
+                       MAX_CONV_TURNS, MAX_CONV_ENTRIES, GROUP_CONTEXT_LINES,
+                       MAX_REPLY_TOKENS, REPLY_TEMPERATURE)
 from ..state import (_ws, _kicked_offline_detected,
                       _health_check_failures, msg_buffer, last_msg_time,
                       silenced_groups, priv_summary_state, conv_history,
@@ -32,6 +34,7 @@ from .persona import handle_persona
 from .admin import handle_admin, handle_knowledge, _extract_knowledge
 from .auto_reply import process_auto_reply
 from ..ws import call_api
+from ..web_search import search_web, should_search, format_search_results
 
 
 # ====== WebSocket 连接 ======
@@ -261,7 +264,7 @@ async def handle_messages(ws):
         last_msg_time[group_id] = now
 
         if group_id not in msg_buffer:
-            msg_buffer[group_id] = deque(maxlen=50)
+            msg_buffer[group_id] = deque(maxlen=60)
         ts = now.strftime("%H:%M")
         msg_buffer[group_id].append(f"[{ts}] {nickname}: {raw_msg}")
 
@@ -389,45 +392,127 @@ async def handle_messages(ws):
                     # LLM 自由对话
                     if not group_has_perm(group_id, "chat"):
                         continue
+
+                    # ── 解析 QQ 引用（reply）──
+                    reply_context = ""
+                    clean_cmd = cmd
+                    reply_match = re.match(r"^\[CQ:reply,id=(-?\d+)\]", cmd)
+                    if reply_match:
+                        reply_id = reply_match.group(1)
+                        clean_cmd = cmd[reply_match.end():].strip()
+                        # 尝试从 msg_buffer 中找被引用的原始消息
+                        buf_list = list(msg_buffer.get(group_id, deque(maxlen=60)))
+                        quoted_text = None
+                        # 遍历最近的消息，找可能的被引用内容（按时间邻近）
+                        for line in reversed(buf_list[:-1]):  # 排除当前消息自己
+                            m = re.match(r"\[\d\d:\d\d\] (.+?): (.+)", line)
+                            if m:
+                                quoted_text = f"「{m.group(1)}」说过：{m.group(2)}"
+                                break  # 取最近一条非Bot消息
+                        if quoted_text:
+                            reply_context = f"（此人在回复 {quoted_text}）"
+                        elif clean_cmd:
+                            reply_context = "（此人在引用/回复群里的某条消息）"
+                        else:
+                            reply_context = "（此人在引用/回复群里的某条消息，但没附加文字）"
+
+                    # ── 联网搜索（按需触发）──
+                    search_context = ""
+                    search_query = should_search(clean_cmd or cmd)
+                    if search_query:
+                        print(f"[搜索] 触发搜索: 「{search_query}」")
+                        results = await search_web(search_query, num=5)
+                        search_context = format_search_results(results)
+
+                    # ── 构建 system prompt：人设 + 群聊指导 + 思考增强 ──
                     persona = get_persona_for_group(group_id)
-                    system_msg = (persona["system_prompt"]
-                        + f"\n\n【重要】当前对你说话的人是「{nickname}」(QQ:{user_id})。"
-                        + "群聊中有多个不同的人，每个人的对话是独立的。你必须分清谁说过什么——不要将A的话当成B的话，不要混淆不同人的观点和身份。"
-                        + "如果对话历史中出现了其他人的名字，那说明是不同的人在跟你说话，请分别对待。")
+                    system_msg = (
+                        persona["system_prompt"]
+                        + f"\n\n## 当前对话者\n"
+                        + f"正在对你说话的人是「{nickname}」(QQ:{user_id})。"
+                        + f"\n\n## 思考准则\n"
+                        + f"1. 回答前先在心里分析：对方真正想问什么？有什么隐含的前提或情绪？不要只看字面意思。\n"
+                        + f"2. 群里有多个不同的人，A说的话可能影响B和你的对话。回复时要综合考虑多人的立场。\n"
+                        + f"3. 遇到需要事实性知识的问题，先确认自己是否确定。如果提供了搜索结果，优先参考。\n"
+                        + f"\n## 群聊参与准则\n"
+                        + f"1. 你是在QQ群里和大家聊天，不是客服也不是答题机器。像真人一样自然地说话。\n"
+                        + f"2. 人设是你的底色，但聊天内容才是你回应的依据。不要因为人设拒绝参与话题——如果群友在聊什么，你就跟着聊。\n"
+                        + f"3. 回复长短由聊天内容决定：对方说很多你就多回点，对方简短你就简短，像真人一样自然调整。\n"
+                        + f"4. 不要每条回复都带emoji或感叹号，语气要有变化。有时候冷静，有时候热情。\n"
+                        + f"5. 可以反问、追问、开适度的玩笑。不要每条都是\"你好呀\"式的客套。"
+                    )
+                    if search_context:
+                        system_msg += f"\n\n{search_context}"
                     messages = [{"role": "system", "content": system_msg}]
 
+                    # ── 对话历史（标注说话人）──
                     history_key = (group_id, user_id)
                     history = conv_history.get(history_key)
                     if history:
                         for h in list(history):
                             if h["role"] == "user":
-                                # 标注说话人身份，防止LLM混淆
                                 speaker = h.get("name", str(user_id))
                                 messages.append({"role": "user", "content": f"「{speaker}」说：{h['content']}"})
                             else:
                                 messages.append({"role": h["role"], "content": h["content"]})
 
-                    buf = list(msg_buffer.get(group_id, deque(maxlen=30)))
-                    recent = buf[-5:] if len(buf) >= 5 else buf
+                    # ── 群聊环境（扩展上下文 + 标注所有说话人）──
+                    buf = list(msg_buffer.get(group_id, deque(maxlen=60)))
+                    recent = buf[-GROUP_CONTEXT_LINES:] if len(buf) >= GROUP_CONTEXT_LINES else buf
+                    ctx_text = ""
                     if recent:
-                        # 在群聊上下文中标注其他说话人 vs 目标说话人
-                        tagged_recent = []
+                        # 组装群聊上下文，标注每个说话人的身份
+                        lines = []
                         for line in recent:
-                            if nickname in line:
-                                tagged_recent.append(line + " ← 当前说话人")
+                            # 提取发言人昵称用于标注
+                            m = re.match(r"\[\d\d:\d\d\] (.+?):", line)
+                            speaker_in_line = m.group(1) if m else ""
+                            if speaker_in_line == nickname:
+                                lines.append(line + "  ← 当前在对你说话")
+                            elif speaker_in_line and speaker_in_line != nickname:
+                                lines.append(line)
                             else:
-                                tagged_recent.append(line)
-                        ctx_text = "【群聊环境】（标注了谁是当前对你说话的人）\n" + "\n".join(tagged_recent) + f"\n\n【请回复「{nickname}」(QQ:{user_id})，注意他不是群里其他人】"
-                        messages.append({"role": "user", "content": f"{ctx_text}\n{cmd}"})
-                    else:
-                        messages.append({"role": "user", "content": f"「{nickname}」对你说：{cmd}"})
+                                lines.append(line)
 
-                    reply = await call_llm(messages, max_tokens=500, temperature=0.8)
+                        # 识别最近有哪些不同的人在说话
+                        speakers_in_context = set()
+                        for line in recent:
+                            m = re.match(r"\[\d\d:\d\d\] (.+?):", line)
+                            if m: speakers_in_context.add(m.group(1))
+
+                        ctx_text = (
+                            f"## 群聊实时环境（共{len(lines)}条，说话人：{', '.join(speakers_in_context)}）\n"
+                            + "\n".join(lines)
+                            + f"\n\n## 你的任务\n"
+                            + f"「{nickname}」在对你说话"
+                            + (f"。{reply_context}" if reply_context else "")
+                            + f"。请综合群聊环境和你的对话历史，自然地回复。\n"
+                            + f"回复要求：像真人聊天一样，长短由内容决定，不要客套模板。"
+                        )
+                        messages.append({"role": "user", "content": f"{ctx_text}\n{clean_cmd}"})
+                    else:
+                        msg_text = f"「{nickname}」对你说：{clean_cmd}"
+                        if reply_context:
+                            msg_text = f"「{nickname}」{reply_context}：{clean_cmd}"
+                        messages.append({"role": "user", "content": msg_text})
+
+                    # ── 自适应 max_tokens：根据上下文长度动态调整 ──
+                    ctx_len = len(display_cmd or "") + sum(len(m["content"]) for m in messages)
+                    if ctx_len < 500:
+                        dyn_tokens = 300
+                    elif ctx_len < 1500:
+                        dyn_tokens = 500
+                    elif ctx_len < 3000:
+                        dyn_tokens = 700
+                    else:
+                        dyn_tokens = MAX_REPLY_TOKENS
+
+                    reply = await call_llm(messages, max_tokens=dyn_tokens, temperature=REPLY_TEMPERATURE)
                     if reply:
                         await send_group_msg(ws, group_id, maybe_sticker(reply))
                         if history_key not in conv_history:
-                            conv_history[history_key] = deque(maxlen=16)
-                        conv_history[history_key].append({"role": "user", "name": nickname, "content": cmd})
+                            conv_history[history_key] = deque(maxlen=MAX_CONV_ENTRIES)
+                        conv_history[history_key].append({"role": "user", "name": nickname, "content": clean_cmd or cmd})
                         conv_history[history_key].append({"role": "assistant", "content": reply})
             else:
                 print(f"[群{group_id}] {nickname}: {raw_msg[:60]}")
