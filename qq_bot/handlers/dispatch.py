@@ -35,7 +35,7 @@ from .admin import handle_admin, handle_knowledge, _extract_knowledge
 from .auto_reply import process_auto_reply
 from ..ws import call_api
 from ..web_search import search_web, should_search, format_search_results
-from ..knowledge_search import search as kb_search, should_query_kb, format_kb_results
+from ..knowledge_search import search as kb_search, should_query_kb, format_kb_results, build_grounding_prompt
 
 
 # ====== WebSocket 连接 ======
@@ -419,11 +419,13 @@ async def handle_messages(ws):
 
                     # ── 知识库检索（BanG Dream相关问题优先）──
                     kb_context = ""
+                    kb_grounding = ""
                     kb_query = should_query_kb(clean_cmd or cmd)
                     if kb_query:
                         print(f"[知识库] 触发检索: 「{kb_query}」")
                         kb_results = kb_search(kb_query, top_n=3)
                         kb_context = format_kb_results(kb_results)
+                        kb_grounding = build_grounding_prompt(kb_results)
 
                     # ── 联网搜索（按需触发，作为补充）──
                     search_context = ""
@@ -450,6 +452,8 @@ async def handle_messages(ws):
                     )
                     if kb_context:
                         system_msg += f"\n\n{kb_context}"
+                    if kb_grounding:
+                        system_msg += f"\n\n{kb_grounding}"
                     if search_context:
                         system_msg += f"\n\n{search_context}"
                     messages = [{"role": "system", "content": system_msg}]

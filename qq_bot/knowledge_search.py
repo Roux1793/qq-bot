@@ -143,10 +143,33 @@ def should_query_kb(text: str) -> str | None:
 
 
 def format_kb_results(results: list[dict]) -> str:
-    """格式化知识库检索结果为LLM上下文"""
+    """格式化知识库检索结果为LLM上下文（紧凑格式，优先事实）"""
     if not results:
         return ""
-    lines = ["## 知识库检索结果（请严格据此回答，不要编造）"]
+    lines = ["[知识库检索结果 - 以下事实必须严格参照，禁止编造]"]
+    total_chars = 0
     for i, r in enumerate(results, 1):
-        lines.append(f"\n### {r['title']} (来源: {r['file']})\n{r['content'][:2000]}")
+        content = r['content'][:1500]  # 每节最多1500字
+        lines.append(f"\n--- {r['title']} ---\n{content}")
+        total_chars += len(content)
+        if total_chars > 3000:  # 总上限3000字
+            break
     return "\n".join(lines)
+
+
+def build_grounding_prompt(kb_results: list[dict]) -> str:
+    """构建grounding验证提示，强制LLM对照检索结果"""
+    if not kb_results:
+        return ""
+    facts = []
+    for r in kb_results[:3]:
+        # 提取可能的事实性信息
+        title = r['title']
+        content = r['content'][:800]
+        # 找日期、数字等硬事实
+        date_matches = re.findall(r'(\d{4}年\d{1,2}月\d{1,2}日|\d{4}年|\d{1,2}月\d{1,2}日|\d+岁|\d+cm|#\w+)', content)
+        if date_matches:
+            facts.append(f"{title}: {' '.join(date_matches[:5])}")
+    if facts:
+        return "## 核实清单（回答前对照）\n" + "\n".join(f"- {f}" for f in facts[:8])
+    return ""
