@@ -35,6 +35,7 @@ from .admin import handle_admin, handle_knowledge, _extract_knowledge
 from .auto_reply import process_auto_reply
 from ..ws import call_api
 from ..web_search import search_web, should_search, format_search_results
+from ..knowledge_search import search as kb_search, should_query_kb, format_kb_results
 
 
 # ====== WebSocket 连接 ======
@@ -416,7 +417,15 @@ async def handle_messages(ws):
                         else:
                             reply_context = "（此人在引用/回复群里的某条消息，但没附加文字）"
 
-                    # ── 联网搜索（按需触发）──
+                    # ── 知识库检索（BanG Dream相关问题优先）──
+                    kb_context = ""
+                    kb_query = should_query_kb(clean_cmd or cmd)
+                    if kb_query:
+                        print(f"[知识库] 触发检索: 「{kb_query}」")
+                        kb_results = kb_search(kb_query, top_n=3)
+                        kb_context = format_kb_results(kb_results)
+
+                    # ── 联网搜索（按需触发，作为补充）──
                     search_context = ""
                     search_query = should_search(clean_cmd or cmd)
                     if search_query:
@@ -429,14 +438,18 @@ async def handle_messages(ws):
                     system_msg = (
                         persona["system_prompt"]
                         + f"\n\n## 当前对话者\n"
-                        + f"正在对你说话的人是「{nickname}」(QQ:{user_id})。你必须回复ta。"
-                        + f"\n\n## 回复准则\n"
+                        + f"正在对你说话的人是「{nickname}」(QQ:{user_id})。你必须回复ta。\n"
+                        + f"【重要】用QQ号区分人：群里有昵称相似的人时，靠QQ号（{user_id}）来区分，不要搞混。\n"
+                        + f"【重要】跨群隔离：你在这个群的对话和你与其他群的对话完全独立。不要把在别的群发生的事带到这个群来。\n"
+                        + f"\n## 回复准则\n"
                         + f"1. 像真人聊天一样自然回应，长短由对方说话内容决定，不要客套模板。\n"
                         + f"2. 人设是你的底色但不是牢笼——群友聊什么你就跟着聊，不要拒绝参与话题。\n"
                         + f"3. 群里有多个不同的人，回复某人时要考虑其他人说了什么，综合判断。\n"
                         + f"4. 语气有变化，有时冷静有时热情，不要每条都emoji或感叹号。\n"
                         + f"5. 遇到不确定的事实问题，如有搜索结果就参考，没有就坦诚说不知道。"
                     )
+                    if kb_context:
+                        system_msg += f"\n\n{kb_context}"
                     if search_context:
                         system_msg += f"\n\n{search_context}"
                     messages = [{"role": "system", "content": system_msg}]
@@ -457,20 +470,19 @@ async def handle_messages(ws):
                     recent = buf[-GROUP_CONTEXT_LINES:] if len(buf) >= GROUP_CONTEXT_LINES else buf
                     ctx_text = ""
                     if recent:
-                        # 组装群聊上下文，标注每个说话人的身份
+                        # 组装群聊上下文，标注每个说话人的身份（昵称+QQ号）
                         lines = []
                         for line in recent:
-                            # 提取发言人昵称用于标注
                             m = re.match(r"\[\d\d:\d\d\] (.+?):", line)
                             speaker_in_line = m.group(1) if m else ""
                             if speaker_in_line == nickname:
-                                lines.append(line + "  ← 当前在对你说话")
-                            elif speaker_in_line and speaker_in_line != nickname:
+                                lines.append(line + f"  ← 当前在对你说话 (QQ:{user_id})")
+                            elif speaker_in_line:
                                 lines.append(line)
                             else:
                                 lines.append(line)
 
-                        # 识别最近有哪些不同的人在说话
+                        # 识别最近有哪些不同的人在说话（列出QQ号区分相似昵称）
                         speakers_in_context = set()
                         for line in recent:
                             m = re.match(r"\[\d\d:\d\d\] (.+?):", line)
