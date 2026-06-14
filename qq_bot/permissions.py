@@ -59,6 +59,6 @@ def get_persona_for_group(group_id):
     style = get_group_style(group_id)
     if style:
         persona["system_prompt"] = (
-            persona["system_prompt"] + "\n\n【群聊风格参考——模仿群友的说话方式，但保持你的人设不变】\n" + style
+            persona["system_prompt"] + "\n\n【群聊风格参考——了解群友的正面积交流习惯。注意：不模仿粗俗/辱骂内容】\n" + style
         )
     return persona

@@ -8,12 +8,12 @@ from ..config import (REVIVE_CHECK_INTERVAL, REVIVE_DAY_START, REVIVE_DAY_END,
                        REVIVE_SILENCE_MINUTES, REVIVE_EXCLUDE_GROUPS,
                        HEALTH_CHECK_INTERVAL, HEALTH_CHECK_MAX_FAILURES,
                        HEALTH_SILENCE_WARN_MINUTES, RESTART_COOLDOWN,
-                       QQ_PROCESS_PATTERN, QQ_RESTART_CMD, ADMIN_QQ)
+                       QQ_PROCESS_PATTERN, QQ_RESTART_CMD, QQ_ACCOUNT, ADMIN_QQ)
 from ..state import (last_msg_time, silenced_groups, _ws, _health_check_failures,
                       _last_restart_time, _kicked_offline_detected)
 from ..permissions import get_persona_for_group
 from ..send import send_group_msg, send_private_msg, maybe_sticker
-from ..llm import call_llm
+from ..llm import call_llm, safe_system_prompt
 
 
 async def revive_checker():
@@ -36,7 +36,7 @@ async def revive_checker():
             if silence >= REVIVE_SILENCE_MINUTES:
                 person = get_persona_for_group(group_id)
                 reply = await call_llm([
-                    {"role": "system", "content": f"{person['system_prompt']} 你是群里的成员。群已经沉默了{silence:.0f}分钟，请自然地打破沉默，比如问大家在忙什么、分享一个有趣的话题等。要贴合你当前的人设。"},
+                    {"role": "system", "content": f"{safe_system_prompt(person)} 群已经沉默了{silence:.0f}分钟，你是群里的成员。请自然地打破沉默，比如问大家在忙什么、分享一个有趣的话题等。要贴合你当前的人设。"},
                     {"role": "user", "content": "群里好一阵没人说话了，你发点什么活跃一下气氛吧。"},
                 ], max_tokens=120, temperature=0.9)
                 if reply:
@@ -66,7 +66,7 @@ async def connection_health_checker():
         healthy = False
         for attempt in range(2):
             result = await call_api("send_private_msg",
-                {"user_id": 2712841947, "message": "."}, timeout=15)
+                {"user_id": int(QQ_ACCOUNT), "message": "."}, timeout=15)
             if result and result.get("status") == "ok":
                 healthy = True
                 break

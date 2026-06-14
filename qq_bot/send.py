@@ -1,4 +1,5 @@
 """QQ Bot 消息发送 + 数据文件管理 + 工具函数"""
+import asyncio
 import json
 import os
 import random
@@ -23,21 +24,23 @@ def save_json(path: Path, data: dict):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ====== 发送消息 ======
+# ====== 消息发送 ======
+
+async def _send_long(ws, action: str, params: dict, text: str):
+    """分段发送长消息（>800 字时自动拆分）"""
+    parts = [text[i:i + 800] for i in range(0, len(text), 800)]
+    for i, part in enumerate(parts):
+        if len(parts) > 1:
+            part = f"({i + 1}/{len(parts)})\n{part}"
+        payload = json.dumps({"action": action, "params": {**params, "message": part}}, ensure_ascii=False)
+        await ws.send(payload)
+        if i < len(parts) - 1:
+            await asyncio.sleep(2)
+
 
 async def send_private_msg(ws, user_id, text):
     try:
-        if len(text) > 800:
-            parts = [text[i:i + 800] for i in range(0, len(text), 800)]
-            for i, part in enumerate(parts):
-                prefix = f"({i + 1}/{len(parts)})\n" if len(parts) > 1 else ""
-                await ws.send(json.dumps({"action": "send_private_msg",
-                    "params": {"user_id": user_id, "message": prefix + part}}, ensure_ascii=False))
-                import asyncio
-                await asyncio.sleep(2)
-        else:
-            await ws.send(json.dumps({"action": "send_private_msg",
-                "params": {"user_id": user_id, "message": text}}, ensure_ascii=False))
+        await _send_long(ws, "send_private_msg", {"user_id": user_id}, text)
     except Exception as e:
         print(f"[私聊发送] 失败: {e}")
 
@@ -45,19 +48,7 @@ async def send_private_msg(ws, user_id, text):
 async def send_group_msg(ws, group_id, text):
     try:
         print(f"[发送] 群{group_id}: {text[:80]}")
-        if len(text) > 800:
-            parts = [text[i:i + 800] for i in range(0, len(text), 800)]
-            for i, part in enumerate(parts):
-                prefix = f"({i + 1}/{len(parts)})\n" if len(parts) > 1 else ""
-                payload = json.dumps({"action": "send_group_msg",
-                    "params": {"group_id": group_id, "message": prefix + part}}, ensure_ascii=False)
-                await ws.send(payload)
-                import asyncio
-                await asyncio.sleep(2)
-        else:
-            payload = json.dumps({"action": "send_group_msg",
-                "params": {"group_id": group_id, "message": text}}, ensure_ascii=False)
-            await ws.send(payload)
+        await _send_long(ws, "send_group_msg", {"group_id": group_id}, text)
     except Exception as e:
         print(f"[发送] 失败: {e}")
 

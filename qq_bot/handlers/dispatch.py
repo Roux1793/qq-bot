@@ -10,16 +10,14 @@ from datetime import datetime, timedelta
 import websockets
 
 from ..config import (WS_URL, ADMIN_QQ, STYLE_UPDATE_INTERVAL,
-                       MAX_CONV_TURNS, MAX_CONV_ENTRIES, GROUP_CONTEXT_LINES,
-                       MAX_REPLY_TOKENS, REPLY_TEMPERATURE)
+                       MAX_CONV_ENTRIES, REPLY_TEMPERATURE)
 from ..state import (_ws, _kicked_offline_detected,
                       _health_check_failures, msg_buffer, last_msg_time,
                       silenced_groups, priv_summary_state, conv_history,
                       active_persona, last_summary)
 from ..db import init_db, save_message, cleanup_old_messages, db_stats
 from ..permissions import (is_admin, group_has_perm, group_admin_enabled,
-                            group_admin_public, get_persona_for_group,
-                            save_active_personas)
+                            group_admin_public, save_active_personas)
 from ..send import (send_group_msg, send_private_msg, maybe_sticker,
                      load_json, load_personas, load_auto_reply_rules,
                      load_silenced)
@@ -34,8 +32,7 @@ from .persona import handle_persona
 from .admin import handle_admin, handle_knowledge, _extract_knowledge
 from .auto_reply import process_auto_reply
 from ..ws import call_api
-from ..web_search import search_web, should_search, format_search_results
-from ..knowledge_search import search as kb_search, should_query_kb, format_kb_results, build_grounding_prompt
+from .conversation import build_conversation
 
 
 # ====== WebSocket 连接 ======
@@ -390,7 +387,6 @@ async def handle_messages(ws):
 
                 # === LLM 自由对话（全员可用）===
                 else:
-                    # LLM 自由对话
                     if not group_has_perm(group_id, "chat"):
                         continue
 
@@ -399,17 +395,14 @@ async def handle_messages(ws):
                     clean_cmd = cmd
                     reply_match = re.match(r"^\[CQ:reply,id=(-?\d+)\]", cmd)
                     if reply_match:
-                        reply_id = reply_match.group(1)
                         clean_cmd = cmd[reply_match.end():].strip()
-                        # 尝试从 msg_buffer 中找被引用的原始消息
                         buf_list = list(msg_buffer.get(group_id, deque(maxlen=60)))
                         quoted_text = None
-                        # 遍历最近的消息，找可能的被引用内容（按时间邻近）
-                        for line in reversed(buf_list[:-1]):  # 排除当前消息自己
+                        for line in reversed(buf_list[:-1]):
                             m = re.match(r"\[\d\d:\d\d\] (.+?): (.+)", line)
                             if m:
                                 quoted_text = f"「{m.group(1)}」说过：{m.group(2)}"
-                                break  # 取最近一条非Bot消息
+                                break
                         if quoted_text:
                             reply_context = f"（此人在回复 {quoted_text}）"
                         elif clean_cmd:
@@ -417,111 +410,16 @@ async def handle_messages(ws):
                         else:
                             reply_context = "（此人在引用/回复群里的某条消息，但没附加文字）"
 
-                    # ── 知识库检索（BanG Dream相关问题优先）──
-                    kb_context = ""
-                    kb_grounding = ""
-                    kb_query = should_query_kb(clean_cmd or cmd)
-                    if kb_query:
-                        print(f"[知识库] 触发检索: 「{kb_query}」")
-                        kb_results = kb_search(kb_query, top_n=3)
-                        kb_context = format_kb_results(kb_results)
-                        kb_grounding = build_grounding_prompt(kb_results)
-
-                    # ── 联网搜索（按需触发，作为补充）──
-                    search_context = ""
-                    search_query = should_search(clean_cmd or cmd)
-                    if search_query:
-                        print(f"[搜索] 触发搜索: 「{search_query}」")
-                        results = await search_web(search_query, num=5)
-                        search_context = format_search_results(results)
-
-                    # ── 构建 system prompt：人设 + 群聊指导 + 思考增强 ──
-                    persona = get_persona_for_group(group_id)
-                    system_msg = (
-                        persona["system_prompt"]
-                        + f"\n\n## 当前对话者\n"
-                        + f"正在对你说话的人是「{nickname}」(QQ:{user_id})。你必须回复ta。\n"
-                        + f"【重要】用QQ号区分人：群里有昵称相似的人时，靠QQ号（{user_id}）来区分，不要搞混。\n"
-                        + f"【重要】跨群隔离：你在这个群的对话和你与其他群的对话完全独立。不要把在别的群发生的事带到这个群来。\n"
-                        + f"\n## 回复准则\n"
-                        + f"1. 像真人聊天一样自然回应，长短由对方说话内容决定，不要客套模板。\n"
-                        + f"2. 人设是你的底色但不是牢笼——群友聊什么你就跟着聊，不要拒绝参与话题。\n"
-                        + f"3. 群里有多个不同的人，回复某人时要考虑其他人说了什么，综合判断。\n"
-                        + f"4. 语气有变化，有时冷静有时热情，不要每条都emoji或感叹号。\n"
-                        + f"5. 遇到不确定的事实问题，如有搜索结果就参考，没有就坦诚说不知道。"
+                    # ── 构建对话（KB检索/联网搜索/上下文/历史 集成在 conversation 模块）──
+                    messages, dyn_tokens = await build_conversation(
+                        group_id, user_id, nickname, clean_cmd or cmd,
+                        reply_context=reply_context,
                     )
-                    if kb_context:
-                        system_msg += f"\n\n{kb_context}"
-                    if kb_grounding:
-                        system_msg += f"\n\n{kb_grounding}"
-                    if search_context:
-                        system_msg += f"\n\n{search_context}"
-                    messages = [{"role": "system", "content": system_msg}]
-
-                    # ── 对话历史（标注说话人）──
-                    history_key = (group_id, user_id)
-                    history = conv_history.get(history_key)
-                    if history:
-                        for h in list(history):
-                            if h["role"] == "user":
-                                speaker = h.get("name", str(user_id))
-                                messages.append({"role": "user", "content": f"「{speaker}」说：{h['content']}"})
-                            else:
-                                messages.append({"role": h["role"], "content": h["content"]})
-
-                    # ── 群聊环境（扩展上下文 + 标注所有说话人）──
-                    buf = list(msg_buffer.get(group_id, deque(maxlen=60)))
-                    recent = buf[-GROUP_CONTEXT_LINES:] if len(buf) >= GROUP_CONTEXT_LINES else buf
-                    ctx_text = ""
-                    if recent:
-                        # 组装群聊上下文，标注每个说话人的身份（昵称+QQ号）
-                        lines = []
-                        for line in recent:
-                            m = re.match(r"\[\d\d:\d\d\] (.+?):", line)
-                            speaker_in_line = m.group(1) if m else ""
-                            if speaker_in_line == nickname:
-                                lines.append(line + f"  ← 当前在对你说话 (QQ:{user_id})")
-                            elif speaker_in_line:
-                                lines.append(line)
-                            else:
-                                lines.append(line)
-
-                        # 识别最近有哪些不同的人在说话（列出QQ号区分相似昵称）
-                        speakers_in_context = set()
-                        for line in recent:
-                            m = re.match(r"\[\d\d:\d\d\] (.+?):", line)
-                            if m: speakers_in_context.add(m.group(1))
-
-                        ctx_text = (
-                            f"## 群聊实时环境（共{len(lines)}条，说话人：{', '.join(speakers_in_context)}）\n"
-                            + "\n".join(lines)
-                            + f"\n\n## 你的任务\n"
-                            + f"「{nickname}」在对你说话"
-                            + (f"。{reply_context}" if reply_context else "")
-                            + f"。请综合群聊环境和你的对话历史，自然地回复。\n"
-                            + f"回复要求：像真人聊天一样，长短由内容决定，不要客套模板。"
-                        )
-                        messages.append({"role": "user", "content": f"{ctx_text}\n{clean_cmd}"})
-                    else:
-                        msg_text = f"「{nickname}」对你说：{clean_cmd}"
-                        if reply_context:
-                            msg_text = f"「{nickname}」{reply_context}：{clean_cmd}"
-                        messages.append({"role": "user", "content": msg_text})
-
-                    # ── 自适应 max_tokens：根据上下文长度动态调整 ──
-                    ctx_len = len(clean_cmd or "") + sum(len(m["content"]) for m in messages)
-                    if ctx_len < 500:
-                        dyn_tokens = 300
-                    elif ctx_len < 1500:
-                        dyn_tokens = 500
-                    elif ctx_len < 3000:
-                        dyn_tokens = 700
-                    else:
-                        dyn_tokens = MAX_REPLY_TOKENS
 
                     reply = await call_llm(messages, max_tokens=dyn_tokens, temperature=REPLY_TEMPERATURE)
                     if reply:
                         await send_group_msg(ws, group_id, maybe_sticker(reply))
+                        history_key = (group_id, user_id)
                         if history_key not in conv_history:
                             conv_history[history_key] = deque(maxlen=MAX_CONV_ENTRIES)
                         conv_history[history_key].append({"role": "user", "name": nickname, "content": clean_cmd or cmd})
@@ -530,4 +428,6 @@ async def handle_messages(ws):
                 print(f"[群{group_id}] {nickname}: {raw_msg[:60]}")
                 await process_auto_reply(ws, group_id, user_id, nickname, raw_msg, now)
         except Exception as e:
+            import traceback
             print(f"[错误] 处理消息失败 (群{group_id}): {e}")
+            traceback.print_exc()

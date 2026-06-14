@@ -10,7 +10,7 @@ from ..state import (msg_counter, msg_buffer, last_auto_chime, last_auto_reply,
 from ..permissions import group_auto_reply_enabled, get_persona_for_group, is_admin
 from ..send import send_group_msg, send_private_msg, maybe_sticker
 from ..send import load_auto_reply_rules, save_silenced as do_save_silenced
-from ..llm import call_llm
+from ..llm import call_llm, safe_system_prompt
 
 
 def match_auto_reply(text):
@@ -59,7 +59,7 @@ async def _process_auto_reply(ws, group_id, user_id, nickname, raw_msg, now):
             if not check or "NO" in check.upper():
                 return
             reply = await call_llm([
-                {"role": "system", "content": f"{persona['system_prompt']} 有人喊无聊了！请用一句话（≤30字）推荐一件事或开一个话题。要贴合你的人设。"},
+                {"role": "system", "content": f"{safe_system_prompt(persona)} 有人喊无聊了！请用一句话（≤30字）推荐一件事或开一个话题。要贴合你的人设。"},
                 {"role": "user", "content": "有人无聊，你简短地回一句"},
             ], max_tokens=80, temperature=0.9)
             if reply:
@@ -68,7 +68,7 @@ async def _process_auto_reply(ws, group_id, user_id, nickname, raw_msg, now):
             return
 
         reply = await call_llm([
-            {"role": "system", "content": f"{persona['system_prompt']} 当前群聊中提到了「{kw}」，请自然地加入对话。要求：{hint}。用口语化中文，简短自然。"},
+            {"role": "system", "content": f"{safe_system_prompt(persona)} 当前群聊中提到了「{kw}」，请自然地加入对话。要求：{hint}。用口语化中文，简短自然。"},
             {"role": "user", "content": f"群聊上下文：\n{context}{time_info}\n\n请你自然地插一句："},
         ], max_tokens=200, temperature=0.8)
 
@@ -108,7 +108,7 @@ async def _process_auto_reply(ws, group_id, user_id, nickname, raw_msg, now):
         chat_log = "\n".join(buf[-10:])
 
         quick_reply = await call_llm([
-            {"role": "system", "content": persona["system_prompt"]},
+            {"role": "system", "content": safe_system_prompt(persona)},
             {"role": "user", "content": f"下面是最新的QQ群聊。请根据当前话题自然地插一句话（≤30字），要贴合群聊氛围。不用管别人是否@你。\n\n{chat_log}"},
         ], max_tokens=80, temperature=1.0)
         if quick_reply:
@@ -125,7 +125,7 @@ async def _ai_should_chime(group_id):
     from ..config import DEFAULT_PERSONAS
     prompt = persona.get("chime_prompt", DEFAULT_PERSONAS["default"]["chime_prompt"]).format(chat_log=chat_log)
     result = await call_llm([
-        {"role": "system", "content": persona["system_prompt"]},
+        {"role": "system", "content": safe_system_prompt(persona)},
         {"role": "user", "content": prompt},
     ], max_tokens=120, temperature=0.7)
     if result and "SKIP" not in result.upper():
