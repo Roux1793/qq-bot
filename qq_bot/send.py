@@ -49,8 +49,28 @@ async def send_group_msg(ws, group_id, text):
     try:
         print(f"[发送] 群{group_id}: {text[:80]}")
         await _send_long(ws, "send_group_msg", {"group_id": group_id}, text)
+        # Bot 自己的发言 NapCat 不会回传，手动记入上下文缓冲
+        _record_own_message(group_id, text)
     except Exception as e:
         print(f"[发送] 失败: {e}")
+
+
+def _record_own_message(group_id: int, text: str):
+    """将 Bot 自己的发言写入群聊缓冲，使其能感知自己说过什么"""
+    from datetime import datetime
+    from collections import deque
+    from .state import msg_buffer, active_persona
+
+    if group_id not in msg_buffer:
+        msg_buffer[group_id] = deque(maxlen=60)
+
+    name_key = active_persona.get(group_id, "default")
+    personas = load_personas()
+    name = personas.get(name_key, {}).get("name", "Bot")
+
+    ts = datetime.now().strftime("%H:%M")
+    short_text = text[:200]
+    msg_buffer[group_id].append(f"[{ts}] {name}: {short_text}")
 
 
 # ====== 表情包 ======
@@ -108,9 +128,27 @@ def save_personas(data):
     save_json(PERSONA_FILE, data)
 
 
+# 默认关键词规则（文件丢失时自动重建）
+_DEFAULT_AUTO_REPLY_RULES = [
+    {"keyword": "几点", "hint": "告诉对方当前时间"},
+    {"keyword": "时间", "hint": "告诉对方当前时间"},
+    {"keyword": "几号", "hint": "告诉对方当前日期"},
+    {"keyword": "日期", "hint": "告诉对方当前日期"},
+    {"keyword": "星期几", "hint": "告诉对方今天是星期几"},
+    {"keyword": "好无聊", "hint": "推荐一件事做"},
+    {"keyword": "没事干", "hint": "推荐一件事做"},
+]
+
+
 def load_auto_reply_rules() -> list[dict]:
     from .config import AUTO_REPLY_FILE
-    return load_json(AUTO_REPLY_FILE, {"rules": []}).get("rules", [])
+    data = load_json(AUTO_REPLY_FILE, {"rules": []})
+    rules = data.get("rules", [])
+    if not rules:
+        # 文件丢失 → 用默认规则重建
+        save_json(AUTO_REPLY_FILE, {"rules": _DEFAULT_AUTO_REPLY_RULES})
+        return list(_DEFAULT_AUTO_REPLY_RULES)
+    return rules
 
 
 def save_auto_reply_rules(rules: list[dict]):
