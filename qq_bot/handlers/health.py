@@ -40,7 +40,7 @@ async def revive_checker():
                     {"role": "user", "content": "群里好一阵没人说话了，你发点什么活跃一下气氛吧。"},
                 ], max_tokens=120, temperature=0.9)
                 if reply:
-                    await send_group_msg(_ws, group_id, maybe_sticker(reply))
+                    await send_group_msg(_ws, group_id, maybe_sticker(reply, group_id))
                     print(f"[复活] 群{group_id} 沉默{silence:.0f}分钟，已发送")
                 last_msg_time[group_id] = now
 

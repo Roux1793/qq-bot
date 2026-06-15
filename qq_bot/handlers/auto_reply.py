@@ -63,7 +63,7 @@ async def _process_auto_reply(ws, group_id, user_id, nickname, raw_msg, now):
                 {"role": "user", "content": "有人无聊，你简短地回一句"},
             ], max_tokens=80, temperature=0.9)
             if reply:
-                await send_group_msg(ws, group_id, maybe_sticker(reply))
+                await send_group_msg(ws, group_id, maybe_sticker(reply, group_id))
                 print(f"[群{group_id}] 自动回复: 触发「{kw}」(已核实)")
             return
 
@@ -73,7 +73,7 @@ async def _process_auto_reply(ws, group_id, user_id, nickname, raw_msg, now):
         ], max_tokens=200, temperature=0.8)
 
         if reply:
-            await send_group_msg(ws, group_id, maybe_sticker(reply))
+            await send_group_msg(ws, group_id, maybe_sticker(reply, group_id))
             print(f"[群{group_id}] 自动回复: 触发「{kw}」")
         return
 

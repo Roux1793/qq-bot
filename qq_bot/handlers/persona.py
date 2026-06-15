@@ -85,22 +85,35 @@ async def handle_persona(ws, group_id, user_id, cmd):
                 f"当前人设「{p['name']}」。请描述你想怎么改，例如：\n"
                 f"@bot 修改人设 让她说话更温柔一点，不要那么傲娇")
             return
-        await send_group_msg(ws, group_id, f"正在修改人设「{p['name']}」...")
+        await send_group_msg(ws, group_id, f"正在修改人设「{p['name']}」(已备份当前版本)...")
+        # 先备份
+        import copy
+        backup = copy.deepcopy(p)
+        # 估算所需的 max_tokens（system_prompt 长度 / 2 ≈ token 数，加 50% 余量）
+        estimated_tokens = max(600, int(len(p["system_prompt"]) * 0.75 + 200))
         new_prompt = await call_llm([
             {"role": "system", "content": (
                 "你是一个人设编辑器。根据用户的要求修改下面的 system_prompt。\n"
                 "规则：\n"
                 "1. 保持原有的角色名(name)和背景设定不变，只按用户要求调整性格、口癖、回复风格\n"
                 "2. 只输出修改后的完整 system_prompt，不要加任何解释或前缀\n"
-                "3. 保持原有格式和长度"
+                "3. 以下段落绝对不准修改、不准删除、不准缩短：## 不可变事实、## 称呼规则、## 禁忌\n"
+                "4. 保持原有格式和长度"
             )},
             {"role": "user", "content": f"当前人设 ({current}):\n{p['system_prompt']}\n\n修改要求: {desc}"},
-        ], max_tokens=600, temperature=0.7)
+        ], max_tokens=estimated_tokens, temperature=0.7)
         if new_prompt:
             p["system_prompt"] = new_prompt.strip()
+            # 验证：输出长度不能比输入短 30% 以上（防止截断）
+            if len(p["system_prompt"]) < len(backup["system_prompt"]) * 0.7:
+                personas[current] = backup  # 回滚
+                save_personas(personas)
+                await send_group_msg(ws, group_id,
+                    "修改失败：LLM 输出疑似截断，已自动回滚。请尝试更具体的修改描述。")
+                return
             personas[current] = p
             save_personas(personas)
-            await send_group_msg(ws, group_id, f"「{p['name']}」人设已更新 ✓")
+            await send_group_msg(ws, group_id, f"「{p['name']}」人设已更新 ✓ ({len(p['system_prompt'])}字)")
         else:
             await send_group_msg(ws, group_id, "修改失败，请稍后重试。")
         return

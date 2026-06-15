@@ -1,8 +1,20 @@
 """联网搜索 — 用 DuckDuckGo 获取搜索结果，供 LLM 参考"""
+import os
 import re
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
+
+# Clash 代理（DuckDuckGo 在国内需代理）
+_SEARCH_PROXY = os.environ.get("SEARCH_PROXY", "http://127.0.0.1:7897")
+
+
+def _decode_ddg_url(raw: str) -> str:
+    """解码 DuckDuckGo 重定向 URL，提取真实目标 URL"""
+    m = re.search(r'uddg=([^&]+)', raw)
+    if m:
+        return unquote(m.group(1))
+    return raw
 
 
 async def search_web(query: str, num: int = 5) -> list[dict]:
@@ -12,7 +24,7 @@ async def search_web(query: str, num: int = 5) -> list[dict]:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(timeout=12, proxy=_SEARCH_PROXY) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code != 200:
                 print(f"[搜索] HTTP {resp.status_code}")
@@ -24,16 +36,19 @@ async def search_web(query: str, num: int = 5) -> list[dict]:
 
     # 解析 DuckDuckGo HTML 结果
     results = []
-    # 匹配结果块: <a rel="nofollow" class="result__a" href="URL">TITLE</a>
-    # 和 <a class="result__snippet">SNIPPET</a>
-    blocks = re.split(r'<div class="result__body', html)[1:]  # skip header
+    blocks = re.split(r'<div class="[^"]*result__body[^"]*"', html)[1:]
     for block in blocks:
-        title_m = re.search(r'class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]+)<', block)
-        snippet_m = re.search(r'class="result__snippet"[^>]*>([^<]+)<', block)
+        # 标题 + 原始 URL（DDG 重定向链接）
+        title_m = re.search(r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.+?)</a>', block)
+        # 摘要（可能包含 <b> 等标签）
+        snippet_m = re.search(r'class="result__snippet"[^>]*>(.+?)</a>', block)
         if title_m:
+            raw_url = title_m.group(1).strip()
+            # 解码 DDG 重定向 URL（uddg= 参数）
+            real_url = _decode_ddg_url(raw_url)
             results.append({
                 "title": re.sub(r'<[^>]+>', '', title_m.group(2)).strip(),
-                "url": title_m.group(1).strip(),
+                "url": real_url,
                 "snippet": re.sub(r'<[^>]+>', '', snippet_m.group(1)).strip() if snippet_m else ""
             })
             if len(results) >= num:
@@ -63,7 +78,7 @@ def should_search(text: str) -> str | None:
     # 事实性/知识性问题
     factual_patterns = [
         r"(什么是|什么叫|啥是|定义一下|解释一下)[：:\s]*(.+?)(?:[？?]|$)",
-        r"(怎么|如何|怎样)(做|办|处理|解决|实现|配置|安装|部署|使用|写|弄|搞)?[：:\s]*(.+?)(?:[？?]|$)",
+        r"(怎么|如何|怎样)(做|办|处理|解决|实现|配置|安装|部署|使用|写|弄|搞)[：:\s]*(.+?)(?:[？?]|$)",
         r"为什么[：:\s]*(.+?)(?:[？?]|$)",
         r"(.+?)(?:是谁|是什么|是哪|在哪|什么时候|多少钱|怎么样|好不好|行不行|对不对)(?:[？?]|$)",
         r"(最近|今天|昨天|本周|今年).*(?:新闻|事件|发生了|有什么|怎么样)(?:[？?]|$)",

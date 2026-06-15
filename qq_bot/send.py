@@ -75,7 +75,12 @@ def clean_reply(text: str) -> str:
     return text
 
 
-def maybe_sticker(text: str) -> str:
+def maybe_sticker(text: str, group_id: int = 0) -> str:
+    # 只在祥子人设时发表情包
+    if group_id:
+        from .state import active_persona
+        if active_persona.get(group_id, "default") != "祥子":
+            return text
     cleaned = clean_reply(text)
     if not cleaned:
         cleaned = text
