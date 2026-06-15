@@ -8,7 +8,6 @@ bridge.log
 panel.log
 qq.log
 personas.json
-auto_reply.json
 active_personas.json
 silenced_groups.json
 group_perms.json
