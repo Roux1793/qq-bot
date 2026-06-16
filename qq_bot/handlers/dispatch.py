@@ -440,7 +440,7 @@ async def handle_messages(ws):
                 )
                 reply = await call_llm(messages, max_tokens=dyn_tokens, temperature=REPLY_TEMPERATURE)
                 if reply:
-                    await send_group_msg(ws, group_id, maybe_sticker(reply, group_id))
+                    await send_group_msg(ws, group_id, maybe_sticker(reply, group_id), reply_to=nickname)
                     history_key = (group_id, user_id)
                     if history_key not in conv_history:
                         conv_history[history_key] = deque(maxlen=MAX_CONV_ENTRIES)

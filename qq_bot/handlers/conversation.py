@@ -82,9 +82,25 @@ async def build_conversation(
     buf = list(msg_buffer.get(group_id, deque(maxlen=60)))
     recent = buf[-GROUP_CONTEXT_LINES:] if len(buf) >= GROUP_CONTEXT_LINES else buf
     if recent:
-        # 组装群聊上下文，标注说话人
+        # 组装群聊上下文，标注说话人 + Bot 回复对象
         lines = []
+        other_replies = []  # Bot 回复其他人的记录
         for line in recent:
+            # 检查是否是 Bot 自己的发言（带 →某人 标记）
+            bot_reply_m = re.match(r"\[\d\d:\d\d\] (.+?) →(.+?): (.+)", line)
+            if bot_reply_m:
+                bot_name = bot_reply_m.group(1)
+                reply_target = bot_reply_m.group(2)
+                content = bot_reply_m.group(3)
+                if reply_target == nickname:
+                    # Bot 在回复当前说话人 → 这是之前的对话
+                    lines.append(line + "  ← 这是你在回复ta")
+                else:
+                    # Bot 在回复别人 → 标注清楚，防止 LLM 混淆
+                    lines.append(line + f"  【注意：这是你在回复{reply_target}，不是{reply_target}说的话】")
+                    other_replies.append(reply_target)
+                continue
+
             m = re.match(r"\[\d\d:\d\d\] (.+?):", line)
             speaker_in_line = m.group(1) if m else ""
             if speaker_in_line == nickname:
@@ -98,16 +114,26 @@ async def build_conversation(
         speakers_in_context = set()
         for line in recent:
             m = re.match(r"\[\d\d:\d\d\] (.+?):", line)
-            if m:
+            if m and " →" not in m.group(0):
                 speakers_in_context.add(m.group(1))
+
+        # 如果有人刚和 Bot 聊过、现在换人了，加显式隔离
+        isolation_note = ""
+        if other_replies:
+            unique_others = list(set(other_replies))
+            isolation_note = (
+                f"\n⚠️ 上面你回复的是 {', '.join(unique_others)}，不是你当前在聊的人。"
+                f"不要把和ta们的对话内容当成和「{nickname}」的对话。每个群友和你的对话是独立的。"
+            )
 
         ctx_text = (
             f"## 群聊实时环境（共{len(lines)}条，说话人：{', '.join(speakers_in_context)}）\n"
             + "\n".join(lines)
+            + isolation_note
             + f"\n\n## 你的任务\n"
-            + f"「{nickname}」在对你说话"
+            + f"「{nickname}」(QQ:{user_id}) 在对你说话"
             + (f"。{reply_context}" if reply_context else "")
-            + f"。请综合群聊环境和你的对话历史，自然地回复。\n"
+            + f"。请只考虑你和「{nickname}」之间的对话历史和当前消息来回复。\n"
             + f"回复要求：像真人聊天一样，长短由内容决定，不要客套模板。"
             + HARD_REMINDER
         )

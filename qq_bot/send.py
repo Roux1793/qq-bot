@@ -45,17 +45,17 @@ async def send_private_msg(ws, user_id, text):
         print(f"[私聊发送] 失败: {e}")
 
 
-async def send_group_msg(ws, group_id, text):
+async def send_group_msg(ws, group_id, text, reply_to: str = ""):
     try:
         print(f"[发送] 群{group_id}: {text[:80]}")
         await _send_long(ws, "send_group_msg", {"group_id": group_id}, text)
         # Bot 自己的发言 NapCat 不会回传，手动记入上下文缓冲
-        _record_own_message(group_id, text)
+        _record_own_message(group_id, text, reply_to)
     except Exception as e:
         print(f"[发送] 失败: {e}")
 
 
-def _record_own_message(group_id: int, text: str):
+def _record_own_message(group_id: int, text: str, reply_to: str = ""):
     """将 Bot 自己的发言写入群聊缓冲，使其能感知自己说过什么"""
     from datetime import datetime
     from collections import deque
@@ -70,7 +70,10 @@ def _record_own_message(group_id: int, text: str):
 
     ts = datetime.now().strftime("%H:%M")
     short_text = text[:200]
-    msg_buffer[group_id].append(f"[{ts}] {name}: {short_text}")
+    if reply_to:
+        msg_buffer[group_id].append(f"[{ts}] {name} →{reply_to}: {short_text}")
+    else:
+        msg_buffer[group_id].append(f"[{ts}] {name}: {short_text}")
 
 
 # ====== 表情包 ======
