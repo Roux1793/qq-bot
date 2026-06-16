@@ -16,6 +16,7 @@ async def build_conversation(
     cmd: str,
     *,
     reply_context: str = "",
+    reply_to_bot: str = "",
 ) -> tuple[list[dict], int]:
     """构建完整的 LLM messages 列表和动态 max_tokens。
 
@@ -137,11 +138,28 @@ async def build_conversation(
             + f"回复要求：像真人聊天一样，长短由内容决定，不要客套模板。"
             + HARD_REMINDER
         )
+        # ── 回复 Bot 自己的消息？最高优先级注入 ──
+        if reply_to_bot:
+            ctx_text = (
+                "⚠️⚠️⚠️ 最高优先：对方在回复你之前说过的话。\n"
+                f"你之前说：「{reply_to_bot}」\n"
+                "请先理解自己说了什么，再看对方回复了什么。不要自相矛盾。\n\n"
+                + ctx_text
+            )
+
         messages.append({"role": "user", "content": f"{ctx_text}\n{cmd}"})
     else:
         msg_text = f"「{nickname}」对你说：{cmd}"
         if reply_context:
             msg_text = f"「{nickname}」{reply_context}：{cmd}"
+        # ── 回复 Bot 自己的消息？最高优先级注入 ──
+        if reply_to_bot:
+            msg_text = (
+                "⚠️⚠️⚠️ 最高优先：对方在回复你之前说过的话。\n"
+                f"你之前说：「{reply_to_bot}」\n"
+                "请先理解自己说了什么，再看对方回复了什么。不要自相矛盾。\n\n"
+                + msg_text
+            )
         messages.append({"role": "user", "content": msg_text + HARD_REMINDER})
 
     # ── 自适应 max_tokens ──

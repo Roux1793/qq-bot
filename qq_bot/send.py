@@ -90,6 +90,8 @@ def random_sticker() -> str | None:
 
 
 def clean_reply(text: str) -> str:
+    # 去掉 LLM 模仿的 [HH:MM] Name: 或 [HH:MM] Name →Someone: 前缀
+    text = re.sub(r"^\[\d\d:\d\d\]\s*\S+?\s*(?:→\S+?\s*)?[:：]\s*", "", text)
     text = re.sub(r"[（(][^）)]*[）)]", "", text)
     text = re.sub(r"\*[^*]+\*", "", text)
     text = re.sub(r"【[^】]+】", "", text)
@@ -99,14 +101,15 @@ def clean_reply(text: str) -> str:
 
 
 def maybe_sticker(text: str, group_id: int = 0) -> str:
+    # 先清理 LLM 输出的前缀（无论是否加表情包都要做）
+    cleaned = clean_reply(text)
+    if not cleaned:
+        cleaned = text
     # 只在祥子人设时发表情包
     if group_id:
         from .state import active_persona
         if active_persona.get(group_id, "default") != "祥子":
-            return text
-    cleaned = clean_reply(text)
-    if not cleaned:
-        cleaned = text
+            return cleaned
     if random.random() < STICKER_CHANCE:
         sticker = random_sticker()
         if sticker:

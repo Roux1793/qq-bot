@@ -13,70 +13,7 @@ _last_synced: dict[int, datetime] = {}
 _SYNC_COOLDOWN = timedelta(seconds=60)
 
 
-# ====== 公共分页器 ======
-
-async def _paginate_messages(group_id, target_count, *, use_ws=False):
-    """通用分页拉取：循环 5 次，每次 100 条，去重后返回格式化行列表"""
-    all_lines, seen = [], set()
-    start_seq = 0
-    for _ in range(5):
-        if not use_ws:
-            messages = await _http_get_page(group_id, start_seq)
-        else:
-            messages = await _ws_get_page(group_id, start_seq)
-        if not messages:
-            break
-
-        nc = 0
-        for line in _format_messages(messages):
-            key = line[:60]
-            if key not in seen:
-                seen.add(key)
-                all_lines.append(line)
-                nc += 1
-
-        start_seq = _last_seq_from(messages)
-        if nc == 0 or len(all_lines) >= target_count:
-            break
-        await asyncio.sleep(1.5)
-
-    all_lines.reverse()
-    if use_ws and all_lines:
-        print(f"[拉取] WebSocket 备用通道成功拉取 {len(all_lines)} 条")
-    return all_lines
-
-
-async def _http_get_page(group_id, start_seq):
-    try:
-        body = {"group_id": group_id, "count": 100}
-        if start_seq:
-            body["message_seq"] = start_seq
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post("http://127.0.0.1:3000/get_group_msg_history", json=body)
-        if r.status_code == 200 and r.json().get("status") == "ok":
-            return r.json().get("data", {}).get("messages", [])
-    except Exception as e:
-        print(f"[拉取] HTTP API 异常: {e}")
-    return None
-
-
-async def _ws_get_page(group_id, start_seq):
-    from .ws import call_api
-    params = {"group_id": group_id, "count": 100}
-    if start_seq:
-        params["message_seq"] = start_seq
-    result = await call_api("get_group_msg_history", params, timeout=20)
-    if result and result.get("status") == "ok":
-        return result.get("data", {}).get("messages", [])
-    return None
-
-
-def _last_seq_from(messages):
-    if not messages:
-        return 0
-    last = messages[-1]
-    return last.get("message_seq") or last.get("seq") or last.get("message_id", 0)
-
+# ====== 消息拉取 ======
 
 def _format_messages(messages):
     lines = []
@@ -99,20 +36,65 @@ def _format_messages(messages):
     return lines
 
 
+async def _fetch_via_http(group_id, count):
+    """通过 HTTP API 拉取消息"""
+    try:
+        body = {"group_id": group_id, "count": count}
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post("http://127.0.0.1:3000/get_group_msg_history", json=body)
+        if r.status_code == 200 and r.json().get("status") == "ok":
+            messages = r.json().get("data", {}).get("messages", [])
+            lines = _format_messages(messages)
+            lines.reverse()
+            return lines
+    except Exception as e:
+        print(f"[拉取] HTTP API 异常: {e}")
+    return []
+
+
+async def _fetch_via_ws(group_id, count):
+    """通过 WebSocket API 拉取消息（备用）"""
+    from .ws import call_api
+    result = await call_api("get_group_msg_history",
+        {"group_id": group_id, "count": count}, timeout=20)
+    if result and result.get("status") == "ok":
+        messages = result.get("data", {}).get("messages", [])
+        lines = _format_messages(messages)
+        lines.reverse()
+        print(f"[拉取] WebSocket 备用通道成功拉取 {len(lines)} 条")
+        return lines
+    return []
+
+
 # ====== 公开 API ======
 
 async def fetch_messages(group_id, count, since=None, until=None):
     """统一消息拉取入口。返回 (lines, source) 其中 source 为 'api'/'ws'/'db'"""
-    lines = await _paginate_messages(group_id, count, use_ws=False)
+    # HTTP API 一次请求
+    lines = await _fetch_via_http(group_id, count)
     if lines:
         await sync_to_db_cached(group_id, count)
+        # API 返回不够？用 DB 补齐
+        if len(lines) < count:
+            db_lines = query_messages(group_id, limit=count, since=since, until=until)
+            if len(db_lines) > len(lines):
+                # 合并去重：DB 可能比 API 全（API 有时间限制）
+                seen = {l[:60] for l in lines}
+                for l in db_lines:
+                    if l[:60] not in seen:
+                        seen.add(l[:60])
+                        lines.append(l)
+                lines.sort(key=lambda s: s[1:12])
+                return lines, 'api+db'
         return _filter_by_time(lines, since, until), 'api'
 
-    lines = await _paginate_messages(group_id, count, use_ws=True)
+    # WebSocket 备用
+    lines = await _fetch_via_ws(group_id, count)
     if lines:
         await sync_to_db_cached(group_id, count)
         return _filter_by_time(lines, since, until), 'ws'
 
+    # DB 兜底
     lines = query_messages(group_id, limit=count, since=since, until=until)
     return lines, 'db'
 
@@ -130,26 +112,31 @@ async def sync_to_db_cached(group_id, target_count=500):
 async def _sync_to_db(group_id, target_count=500):
     """从 HTTP/WS 拉取原始消息并写入本地 DB（去重）"""
     all_msgs, seen_ids = [], set()
-    start_seq = 0
-    for _ in range(5):
-        messages = await _http_get_page(group_id, start_seq)
-        if not messages:
-            messages = await _ws_get_page(group_id, start_seq)
-        if not messages:
-            break
 
-        nc = 0
-        for msg in messages:
-            mid = msg.get("message_id") or msg.get("message_seq") or msg.get("seq", 0)
-            if mid not in seen_ids:
-                seen_ids.add(mid)
-                all_msgs.append(msg)
-                nc += 1
-
-        start_seq = _last_seq_from(messages)
-        if nc == 0 or len(all_msgs) >= target_count:
-            break
-        await asyncio.sleep(1.5)
+    # HTTP 一次拉取
+    try:
+        body = {"group_id": group_id, "count": target_count}
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post("http://127.0.0.1:3000/get_group_msg_history", json=body)
+        if r.status_code == 200 and r.json().get("status") == "ok":
+            messages = r.json().get("data", {}).get("messages", [])
+            for msg in messages:
+                mid = msg.get("message_id") or msg.get("message_seq") or 0
+                if mid not in seen_ids:
+                    seen_ids.add(mid)
+                    all_msgs.append(msg)
+    except Exception as e:
+        print(f"[同步] HTTP 拉取失败: {e}")
+        # 尝试 WS 备用
+        from .ws import call_api
+        result = await call_api("get_group_msg_history",
+            {"group_id": group_id, "count": target_count}, timeout=20)
+        if result and result.get("status") == "ok":
+            for msg in result.get("data", {}).get("messages", []):
+                mid = msg.get("message_id") or msg.get("message_seq") or 0
+                if mid not in seen_ids:
+                    seen_ids.add(mid)
+                    all_msgs.append(msg)
 
     nc = 0
     try:

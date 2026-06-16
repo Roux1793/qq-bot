@@ -7,12 +7,13 @@ import sys
 from collections import deque
 from datetime import datetime, timedelta
 
+import httpx
 import websockets
 
 from ..config import (WS_URL, ADMIN_QQ, STYLE_UPDATE_INTERVAL,
                        MAX_CONV_ENTRIES, REPLY_TEMPERATURE)
-from ..state import (_ws, _kicked_offline_detected,
-                      _health_check_failures, msg_buffer, last_msg_time,
+from .. import state as bot_state
+from ..state import (msg_buffer, last_msg_time,
                       silenced_groups, priv_summary_state, conv_history,
                       active_persona, last_summary)
 from ..db import init_db, save_message, cleanup_old_messages, db_stats
@@ -35,22 +36,55 @@ from ..ws import call_api
 from .conversation import build_conversation
 
 
+# ====== 引用解析 ======
+
+async def _resolve_reply(group_id: int, reply_id: int) -> dict | None:
+    """通过 HTTP API 精确查找被引用的消息（HTTP 无死锁问题）"""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.post(
+                "http://127.0.0.1:3000/get_msg",
+                json={"message_id": reply_id})
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("status") == "ok":
+                msg = data.get("data", {})
+                sender = msg.get("sender", {})
+                nick = sender.get("card") or sender.get("nickname") or "?"
+                content = msg.get("raw_message") or msg.get("message", "")
+                if isinstance(content, list):
+                    parts = []
+                    for seg in content:
+                        if seg.get("type") == "text":
+                            parts.append(seg.get("data", {}).get("text", ""))
+                    content = "".join(parts)
+                content = str(content).strip()
+                if content:
+                    from ..config import QQ_ACCOUNT
+                    is_bot = str(msg.get("user_id", 0)) == str(QQ_ACCOUNT)
+                    return {
+                        "text": f"「{nick}」说过：{content[:200]}",
+                        "is_bot": is_bot,
+                        "content": content[:300],
+                    }
+    except Exception as e:
+        print(f"[引用] HTTP 查找失败: {e}")
+    return None
+
+
+
 # ====== WebSocket 连接 ======
 
 async def connect_ws():
-    global _ws
     retry = 0
     was_previously_connected = False
     while True:
         try:
             print(f"[WS] 连接 {WS_URL} ...")
             async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=10, max_size=2**23) as ws:
-                _ws = ws
+                bot_state._ws = ws
                 print("[WS] 已连接")
                 retry = 0
-                global _health_check_failures, _kicked_offline_detected
-                _health_check_failures = 0
-                _kicked_offline_detected = False
                 if was_previously_connected and ADMIN_QQ:
                     print("[WS] 断开重连成功，通知管理员...")
                     for admin in ADMIN_QQ:
@@ -59,9 +93,9 @@ async def connect_ws():
                     was_previously_connected = False
                 await handle_messages(ws)
         except (websockets.ConnectionClosed, OSError) as e:
-            if _ws is not None:
+            if bot_state._ws is not None:
                 was_previously_connected = True
-            _ws = None
+            bot_state._ws = None
             retry += 1
             delay = min(retry * 5, 60)
             print(f"[WS] 断开: {e}，{delay}s 后重连")
@@ -91,16 +125,16 @@ async def _try_functional(ws, group_id, user_id, cmd, effective_admin, now) -> b
         await handle_search(ws, group_id, cmd)
         return True
 
-    # ── 统计 ──
-    if re.search(r"统计|排行|活跃", cmd):
+    # ── 统计（仅以"统计"/"排行"/"活跃"开头才触发）──
+    if re.match(r"统计|排行|活跃", cmd):
         if not perms_ok(group_id, "stats"):
             await send_group_msg(ws, group_id, "此群未开启统计功能。")
             return True
         await handle_stats(ws, group_id)
         return True
 
-    # ── 总结 ──
-    if re.search(r"总结|汇总|整理", cmd):
+    # ── 总结（仅以"总结"/"汇总"/"整理"开头才触发）──
+    if re.match(r"总结|汇总|整理", cmd):
         if not perms_ok(group_id, "summary"):
             await send_group_msg(ws, group_id, "此群未开启总结功能。")
             return True
@@ -172,7 +206,6 @@ async def _try_persona(ws, group_id, user_id, cmd, effective_admin) -> bool:
 # ====== 核心消息处理 ======
 
 async def handle_messages(ws):
-    global _kicked_offline_detected, _health_check_failures
     last_cleanup = datetime.now()
     knowledge_extract_counter = 0
     style_update_counter = 0
@@ -195,33 +228,14 @@ async def handle_messages(ws):
             if sub in ("offline", "disconnect"):
                 reason = detail if detail else sub
                 print(f"[状态] QQ 已离线 ({reason})")
-                if "kick" in reason.lower() or "kick" in sub.lower():
-                    print("[状态] 检测到 KickedOffLine！标记假死，将触发自动重启...")
-                    _kicked_offline_detected = True
                 for admin in ADMIN_QQ:
                     await send_private_msg(ws, admin,
-                        f"[Bot离线通知]\n时间: {datetime.now().strftime('%m-%d %H:%M:%S')}\n"
-                        f"原因: {reason}\n"
-                        f"{'已标记假死，健康检查将自动重启NapCat' if _kicked_offline_detected else 'Bot将自动尝试重连...'}")
+                        f"[Bot离线通知]\n时间: {datetime.now().strftime('%m-%d %H:%M:%S')}\n原因: {reason}")
             elif sub in ("connect", "online"):
-                _kicked_offline_detected = False
-                _health_check_failures = 0
                 print(f"[状态] QQ 已上线 ({sub})")
                 for admin in ADMIN_QQ:
                     await send_private_msg(ws, admin,
                         f"[Bot上线通知]\n时间: {datetime.now().strftime('%m-%d %H:%M:%S')}\n状态: 已重新连接")
-            continue
-
-        # client_status 通知
-        if data.get("post_type") == "notice" and data.get("notice_type") == "client_status":
-            client_info = data.get("client", {})
-            is_online = client_info.get("online", True)
-            if not is_online:
-                print(f"[状态] QQ客户端离线 (client_status)，标记假死...")
-                _kicked_offline_detected = True
-            else:
-                _kicked_offline_detected = False
-                _health_check_failures = 0
             continue
 
         # 忽略离线文件通知
@@ -363,7 +377,8 @@ async def handle_messages(ws):
         if group_id not in msg_buffer:
             msg_buffer[group_id] = deque(maxlen=60)
         ts = now.strftime("%H:%M")
-        msg_buffer[group_id].append(f"[{ts}] {nickname}: {raw_msg}")
+        mid = data.get("message_id", 0)
+        msg_buffer[group_id].append(f"{mid}|[{ts}] {nickname}: {raw_msg}")
 
         # 定期清理 & 知识提取 & 风格学习
         if (now - last_cleanup) > timedelta(hours=1):
@@ -414,21 +429,22 @@ async def handle_messages(ws):
                 if not group_has_perm(group_id, "chat"):
                     continue
 
-                # 解析 QQ 引用（reply）
+                # 解析 QQ 引用（reply）— 通过 API 精确查找被引用消息
                 reply_context = ""
+                reply_to_bot = ""  # 回复 Bot 自己消息时的高优先级上下文
                 clean_cmd = cmd
                 reply_match = re.match(r"^\[CQ:reply,id=(-?\d+)\]", cmd)
                 if reply_match:
+                    reply_id = int(reply_match.group(1))
                     clean_cmd = cmd[reply_match.end():].strip()
-                    buf_list = list(msg_buffer.get(group_id, deque(maxlen=60)))
-                    quoted_text = None
-                    for line in reversed(buf_list[:-1]):
-                        m = re.match(r"\[\d\d:\d\d\] (.+?): (.+)", line)
-                        if m:
-                            quoted_text = f"「{m.group(1)}」说过：{m.group(2)}"
-                            break
-                    if quoted_text:
-                        reply_context = f"（此人在回复 {quoted_text}）"
+                    resolved = await _resolve_reply(group_id, reply_id)
+                    if resolved:
+                        if resolved.get("is_bot"):
+                            # 回复的是 Bot 自己的消息 → 最高优先级，强制回顾
+                            reply_to_bot = resolved["content"]
+                            reply_context = f"（此人在回复你刚才说的「{resolved['content'][:80]}」）"
+                        else:
+                            reply_context = f"（此人在回复 {resolved['text']}）"
                     elif clean_cmd:
                         reply_context = "（此人在引用/回复群里的某条消息）"
                     else:
@@ -437,6 +453,7 @@ async def handle_messages(ws):
                 messages, dyn_tokens = await build_conversation(
                     group_id, user_id, nickname, clean_cmd or cmd,
                     reply_context=reply_context,
+                    reply_to_bot=reply_to_bot,
                 )
                 reply = await call_llm(messages, max_tokens=dyn_tokens, temperature=REPLY_TEMPERATURE)
                 if reply:

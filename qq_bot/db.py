@@ -33,6 +33,26 @@ def save_message(group_id, user_id, nickname, content):
         print(f"[DB] 写入失败: {e}")
 
 
+def _get_last_msg_times() -> dict[int, datetime]:
+    """返回每个群最后一条消息的时间，用于启动时恢复冷群检测"""
+    try:
+        db = sqlite3.connect(str(DB_PATH))
+        rows = db.execute(
+            "SELECT group_id, MAX(created_at) FROM messages GROUP BY group_id"
+        ).fetchall()
+        db.close()
+        result = {}
+        for gid, ts in rows:
+            try:
+                result[gid] = datetime.fromisoformat(ts)
+            except (ValueError, TypeError):
+                pass
+        return result
+    except Exception as e:
+        print(f"[DB] 读取最后消息时间失败: {e}")
+        return {}
+
+
 def query_messages(group_id, limit=500, since=None, until=None, exclude_user_id=None):
     try:
         db = sqlite3.connect(str(DB_PATH))

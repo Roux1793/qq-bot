@@ -9,7 +9,7 @@ from .db import init_db, db_stats
 from .state import (silenced_groups, active_persona)
 from .send import load_json, load_personas, load_auto_reply_rules, load_silenced
 from .handlers.dispatch import connect_ws
-from .handlers.health import revive_checker, connection_health_checker
+from .handlers.health import revive_checker
 
 
 def _kill_old_bridges():
@@ -45,6 +45,15 @@ async def main():
     global silenced_groups
     silenced_groups.update(load_silenced())
 
+    # 从数据库恢复 last_msg_time，防止重启后冷群检查失效
+    from .db import _get_last_msg_times
+    from .state import last_msg_time
+    db_times = _get_last_msg_times()
+    for gid, dt in db_times.items():
+        if gid not in last_msg_time:
+            last_msg_time[gid] = dt
+    print(f"[启动] 从DB恢复了 {len(db_times)} 个群的最后发言时间")
+
     saved_active = load_json(ACTIVE_PERSONA_FILE, {})
     for k, v in saved_active.items():
         try:
@@ -65,7 +74,6 @@ async def main():
             await asyncio.gather(
                 connect_ws(),
                 revive_checker(),
-                connection_health_checker(),
             )
         except Exception as e:
             print(f"[致命] 主循环异常: {e}", file=sys.stderr)
