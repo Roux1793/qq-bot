@@ -562,6 +562,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"message": out or "无相关进程"})
             return
 
+        if path == "/api/group_names":
+            import urllib.request
+            groups = {}
+            for gid in ["152431674", "1076603635", "1097399511", "462665991"]:
+                try:
+                    req = urllib.request.Request("http://127.0.0.1:3000/get_group_info",
+                        data=json.dumps({"group_id": int(gid)}).encode(),
+                        headers={"Content-Type": "application/json"})
+                    resp = urllib.request.urlopen(req, timeout=5)
+                    data = json.loads(resp.read())
+                    name = data.get("data", {}).get("group_name", "")
+                    groups[gid] = name or gid
+                except Exception:
+                    groups[gid] = gid
+            self._json(groups)
+            return
+
+        if path == "/api/personas":
+            try:
+                with open("/home/roux/personas.json") as f:
+                    personas = json.load(f)
+            except Exception:
+                personas = {}
+            try:
+                with open("/home/roux/active_personas.json") as f:
+                    active = json.load(f)
+            except Exception:
+                active = {}
+            result = {}
+            for key, p in personas.items():
+                result[key] = {"name": p.get("name", key), "active_in": []}
+            for gid, pkey in active.items():
+                if pkey in result:
+                    result[pkey]["active_in"].append(str(gid))
+            self._json(result)
+            return
+
         if path == "/api/panel_log":
             out, _ = run(f"tail -40 {PANEL_LOG} 2>/dev/null")
             self._json({"message": out or "(无日志)"})
@@ -589,6 +626,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Unified: stop bot, restart QQ, then start bot
             task_id = _launch_task("restart_bot")
             self._json({"task_id": task_id, "message": "重启 Bot 任务已创建"})
+            return
+
+        if path == "/api/persona_switch":
+            data = self._body()
+            gid = str(data.get("group_id", ""))
+            persona_key = data.get("persona", "")
+            if not gid or not persona_key:
+                self._json({"error": "需要 group_id 和 persona"})
+                return
+            try:
+                ap_file = "/home/roux/active_personas.json"
+                try:
+                    with open(ap_file) as f:
+                        active = json.load(f)
+                except Exception:
+                    active = {}
+                # 确保每个群只有一个人设
+                # 先清理：如果其他群已经用了这个人设也没关系，一个人设可以用于多个群
+                # 但这个群如果之前有其他人设，替换掉
+                active[gid] = persona_key
+                with open(ap_file, "w") as f:
+                    json.dump(active, f, ensure_ascii=False, indent=2)
+                self._json({"message": f"群 {gid} 已切换为「{persona_key}」，即时生效"})
+            except Exception as e:
+                self._json({"error": str(e)})
             return
 
         if path == "/api/silence":

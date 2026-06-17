@@ -1,7 +1,27 @@
 """QQ Bot 权限管理 + 人设获取 + 管理员检查"""
+from pathlib import Path
 from .config import ADMIN_QQ, PERMS_FILE, DEFAULT_PERMS, ACTIVE_PERSONA_FILE, GROUP_MAX_MSG_LENGTH
 from .send import load_json, save_json, load_personas, get_group_style
 from .state import active_persona
+
+# 跟踪 JSON 文件的修改时间，避免每次都读盘
+_persona_file_mtime: float = 0
+
+
+def _reload_active_personas_if_changed():
+    """如果 active_personas.json 被外部修改（如控制面板），重新加载"""
+    global _persona_file_mtime
+    try:
+        mtime = ACTIVE_PERSONA_FILE.stat().st_mtime
+    except OSError:
+        return
+    if mtime <= _persona_file_mtime:
+        return
+    _persona_file_mtime = mtime
+    data = load_json(ACTIVE_PERSONA_FILE, {})
+    # 清除旧数据，写入新数据（用更新而不是替换，避免其他模块持有的引用失效）
+    active_persona.clear()
+    active_persona.update({int(k): v for k, v in data.items()})
 
 
 def is_admin(user_id):
@@ -52,6 +72,7 @@ def save_active_personas():
 
 
 def get_persona_for_group(group_id):
+    _reload_active_personas_if_changed()  # 面板/文件修改后即时生效，无需重启
     personas = load_personas()
     name = active_persona.get(group_id, "default")
     persona = personas.get(name, personas.get("default", {"name": "默认",
