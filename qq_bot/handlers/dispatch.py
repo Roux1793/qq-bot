@@ -29,6 +29,7 @@ from ..llm import generate_summary
 from .summary import handle_summary
 from .search import handle_search
 from .stats import handle_stats
+from .wordcloud import handle_wordcloud
 from .persona import handle_persona
 from .admin import handle_admin, handle_knowledge, _extract_knowledge
 from .auto_reply import process_auto_reply
@@ -131,6 +132,11 @@ async def _try_functional(ws, group_id, user_id, cmd, effective_admin, now) -> b
             await send_group_msg(ws, group_id, "此群未开启统计功能。")
             return True
         await handle_stats(ws, group_id)
+        return True
+
+    # ── 词云（以"词云"开头触发，可选天数）──
+    if re.match(r"词云", cmd):
+        await handle_wordcloud(ws, group_id, cmd)
         return True
 
     # ── 总结（仅以"总结"/"汇总"/"整理"开头才触发）──
